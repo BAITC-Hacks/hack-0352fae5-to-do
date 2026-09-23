@@ -6,11 +6,12 @@ This is the HackAlem AI **Analytics and Decision-Making / Cybersecurity and Comp
 
 ## What is implemented
 
-- A local Python batch pipeline that reads the three supplied Parquet files and produces `nodes_roles.csv`, `clusters.csv`, `top_nodes.csv`, and the viewer's `graph.json` in one run.
+- A local Python batch pipeline that reads the three supplied Parquet files and produces `nodes_roles.csv`, `clusters.csv`, `top_nodes.csv`, the viewer's `graph.json`, and `investigations.json` in one run.
 - One deterministic primary role per account, with numeric evidence, a role-fit score, and a separate analyst-priority score.
 - Louvain communities, with account count, seed count, internal observed turnover, leading gids, and a rule-based cluster hypothesis.
 - A Next.js viewer with a directed transfer map, gid search, role and cluster filters, a priority-sorted account table, and account details showing evidence, observed flows, and incoming/outgoing counterparties.
 - A two-day matched-outflow measure from transaction dates. It supports interpretation of transit activity; it is **not** a role-assignment rule or proof that the same money moved onward.
+- A backend investigation export for any selected account: directed seed routes of up to four edges, dated transaction witnesses, and specific next-data requests. Frontend integration is pending; see the [investigation handoff](docs/investigations.md).
 
 ## How it works
 
@@ -38,7 +39,7 @@ python -m pip install -r starter/requirements.txt
 python pipeline/run.py --data data --out out
 ```
 
-The final command is the complete recalculation from raw Parquet to the required three CSVs, plus `graph.json`. It is intended to complete within the case's five-minute limit on the supplied dataset. `out/` is generated locally and ignored by Git.
+The final command is the complete recalculation from raw Parquet to the required three CSVs, plus `graph.json` and `investigations.json`. It is intended to complete within the case's five-minute limit on the supplied dataset. `out/` is generated locally and ignored by Git.
 
 To run the viewer locally, use Node.js 20.9 or newer and pnpm 11.7.0 (the version declared in `frontend/package.json`):
 
@@ -121,6 +122,7 @@ Here `amount` and `counterparties` are log-scaled and capped at their respective
 | `out/clusters.csv` | `cluster_id, n_nodes, n_seed, sum_kzt_internal, top_gids, hypothesis` | One row per Louvain community. `sum_kzt_internal` sums original directed edges whose endpoints are both in that community; `top_gids` is a JSON list of identifier strings. |
 | `out/top_nodes.csv` | `rank, gid, role, priority_score, why` | The 20 highest-priority accounts. Each `why` explains its rank and score with the observed amount, counterparties, hop depth, amount-weighted PageRank, and the contributions from the priority formula above. |
 | `out/graph.json` | `meta, nodes, edges` | Viewer data with string gids, directed links, roles, clusters, priority, and precomputed map positions. |
+| `out/investigations.json` | `meta, transactions, edge_transactions, accounts` | All accounts keyed by string gid; seed routes, timing classifications, transaction references, and next-data requests. Versioned metadata includes hashes of the four companion exports. The current viewer does not consume this file. |
 
 `data/` contains the supplied, anonymized Parquet inputs. `starter/` is organizer-provided loading and base-metric code; `pipeline/run.py` adds role rules, ranking, temporal support, clustering, and exports. `frontend/lib/money-data.ts` loads and parses the outputs on the server, and `frontend/app/` renders the interactive viewer. `frontend/data/` holds the committed viewer snapshot. No AI model, LLM, external customer-enrichment source, third-party data API, or paid service is used by the analysis. Vercel hosts the supplied deployment of the viewer.
 
@@ -132,6 +134,7 @@ Here `amount` and `counterparties` are log-scaled and capped at their respective
 - Nineteen seeds have no observed edge. They remain in `nodes_roles.csv` and the map. The graph has disconnected parts; Louvain communities are analysis groups, not confirmed organizations.
 - The supplied dataset uses synthetic gids and is provided for hackathon use. There are no names, balances, customer attributes, labels for true roles, or ground-truth accuracy measure. All roles, priorities, and cluster descriptions are explainable hypotheses for analyst verification. The two-day timing measure cannot trace identical funds through an account.
 - The viewer reads files on disk; it does not offer an upload workflow or live transaction feed.
+- Investigation paths describe observed connections, not traced funds. Date-ordered witnesses require 1–2 days between successive transfers; same-day sequences have unknown order. No amount matching or recurring-pattern detection is performed. Empty route lists mean no seed route was found within four edges. Route enumeration can grow rapidly on denser graphs and would need bounded retrieval at larger scale.
 
 ## Scaling beyond the hackathon dataset
 

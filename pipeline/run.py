@@ -17,6 +17,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from starter.starter import basic_features, build_graph, load, sanity_check  # noqa: E402
+from pipeline.investigations import write_investigations  # noqa: E402
 
 
 ROLE_FACTOR = {
@@ -355,6 +356,7 @@ def main() -> None:
     df, cluster_df, undirected = clusters(graph, df)
     write_outputs(df, cluster_df, args.out)
     write_graph(graph, undirected, df, edges, tx, args.out)
+    write_investigations(graph, nodes, tx, args.out)
     print("Roles:", df.role.value_counts().to_dict())
     print(f"Clusters: {len(cluster_df)}; outputs: {args.out}")
 
