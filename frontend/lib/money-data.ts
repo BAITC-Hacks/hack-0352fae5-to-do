@@ -35,6 +35,34 @@ export type MoneyCluster = {
   hypothesis: string;
 };
 
+export type MoneyGraph = {
+  meta: {
+    n_nodes: number;
+    n_edges: number;
+    n_seed: number;
+    n_tx: number;
+    total_kzt: number;
+    period_start: string;
+    period_end: string;
+    min_transfer_kzt: number;
+  };
+  nodes: {
+    gid: string;
+    role: string;
+    cluster_id: number;
+    priority_score: number;
+    is_seed: boolean;
+    x: number;
+    y: number;
+  }[];
+  edges: {
+    src: string;
+    dst: string;
+    sum_kzt: number;
+    n_tx: number;
+  }[];
+};
+
 function parseCsv(source: string): Record<string, string>[] {
   const rows: string[][] = [];
   let row: string[] = [];
@@ -91,17 +119,21 @@ function bool(value: string): boolean {
 export async function loadMoneyData(): Promise<{
   nodes: MoneyNode[];
   clusters: MoneyCluster[];
+  graph: MoneyGraph;
 } | null> {
   let nodeCsv: string;
   let clusterCsv: string;
+  let graphJson: string;
   let found = false;
   nodeCsv = "";
   clusterCsv = "";
+  graphJson = "";
   for (const directory of [path.resolve(process.cwd(), "../out"), path.resolve(process.cwd(), "data")]) {
     try {
-      [nodeCsv, clusterCsv] = await Promise.all([
+      [nodeCsv, clusterCsv, graphJson] = await Promise.all([
         readFile(path.join(directory, "nodes_roles.csv"), "utf8"),
         readFile(path.join(directory, "clusters.csv"), "utf8"),
+        readFile(path.join(directory, "graph.json"), "utf8"),
       ]);
       found = true;
       break;
@@ -141,5 +173,10 @@ export async function loadMoneyData(): Promise<{
     top_gids: JSON.parse(row.top_gids) as string[],
     hypothesis: row.hypothesis,
   }));
-  return { nodes, clusters };
+  const graph = JSON.parse(graphJson) as MoneyGraph;
+  if (!graph.nodes.every((node) => typeof node.gid === "string") ||
+      !graph.edges.every((edge) => typeof edge.src === "string" && typeof edge.dst === "string")) {
+    throw new Error("graph.json account IDs must be strings");
+  }
+  return { nodes, clusters, graph };
 }

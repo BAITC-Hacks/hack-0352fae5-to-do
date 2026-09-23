@@ -107,13 +107,13 @@ def assign_roles(df: pd.DataFrame) -> pd.DataFrame:
         df.loc[selected, "role"] = role
         remaining &= ~qualifies
 
-    df["peripheral_reason"] = ""
+    df["peripheral_reason"] = "not_peripheral"
     peripheral = df.role == "peripheral"
     df.loc[peripheral & df.truncated_by_depth, "peripheral_reason"] = "censored_depth4"
     df.loc[peripheral & (df.in_deg == 0) & (df.out_deg == 0), "peripheral_reason"] = "isolate"
     df.loc[peripheral & (df.in_deg == 1) & (df.out_deg == 0)
            & (df.depth < 4), "peripheral_reason"] = "single_edge_leaf"
-    df.loc[peripheral & (df.peripheral_reason == ""), "peripheral_reason"] = "below_thresholds"
+    df.loc[peripheral & (df.peripheral_reason == "not_peripheral"), "peripheral_reason"] = "below_thresholds"
 
     score = np.zeros(len(df), dtype=float)
     masks = {role: (df.role == role).to_numpy() for role in ROLE_FACTOR}
@@ -153,7 +153,7 @@ def assign_priority(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def clusters(graph: nx.DiGraph, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def clusters(graph: nx.DiGraph, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, nx.Graph]:
     # Louvain alone uses an undirected projection. Reciprocal edge weights sum.
     undirected = nx.Graph()
     undirected.add_nodes_from(int(gid) for gid in df.gid)
@@ -173,30 +173,38 @@ def clusters(graph: nx.DiGraph, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Data
         cluster_id = cluster_by_gid[int(src)]
         if cluster_id == cluster_by_gid[int(dst)]:
             internal[cluster_id] += float(attr["sum_kzt"])
+    role_order = ["consolidator", "distributor", "coordinator", "transit", "terminal"]
+    role_labels = {
+        "consolidator": "Signs of consolidation",
+        "distributor": "Signs of distribution",
+        "coordinator": "Signs of brokerage",
+        "transit": "Signs of pass-through",
+        "terminal": "Signs of endpoint accumulation",
+    }
     rows = []
     for cluster_id, group in enumerate(ordered):
         subset = df[df.cluster_id == cluster_id]
         top = subset.sort_values(["priority_score", "gid"], ascending=[False, True]).head(5)
         counts = subset.role.value_counts()
-        n_collect = int(counts.get("consolidator", 0))
-        n_distribute = int(counts.get("distributor", 0))
-        n_coordinate = int(counts.get("coordinator", 0))
-        pattern = ("Signs of consolidation" if n_collect else
-                   "Signs of distribution" if n_distribute else
+        dominant = max(role_order, key=lambda role: int(counts.get(role, 0)))
+        pattern = (role_labels[dominant] if counts.get(dominant, 0) else
                    "No role-specific pattern under current thresholds")
-        hypothesis = (f"{pattern}: {n_collect} collectors; "
-                      f"{n_distribute} distributors; {n_coordinate} coordinators; "
-                      f"internal KZT {internal[cluster_id]:.0f}. "
+        hypothesis = (f"{pattern}: {int(counts.get('consolidator', 0))} consolidators; "
+                      f"{int(counts.get('distributor', 0))} distributors; "
+                      f"{int(counts.get('coordinator', 0))} coordinators; "
+                      f"{int(counts.get('transit', 0))} transit; "
+                      f"{int(counts.get('terminal', 0))} terminals; "
+                      f"internal KZT {round(internal[cluster_id])}. "
                       "Louvain on undirected weighted projection.")
         rows.append({
             "cluster_id": cluster_id,
             "n_nodes": len(group),
             "n_seed": int(subset.is_seed.sum()),
-            "sum_kzt_internal": internal[cluster_id],
+            "sum_kzt_internal": round(internal[cluster_id]),
             "top_gids": json.dumps([str(int(gid)) for gid in top.gid]),
             "hypothesis": hypothesis,
         })
-    return df, pd.DataFrame(rows)
+    return df, pd.DataFrame(rows), undirected
 
 
 def fmt(value: float) -> str:
@@ -242,8 +250,6 @@ def evidence(row) -> str:
 
 def write_outputs(df: pd.DataFrame, cluster_df: pd.DataFrame, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    df = df.copy()
-    df["evidence"] = [evidence(row) for row in df.itertuples(index=False)]
     required = ["gid", "role", "role_score", "cluster_id", "priority_score", "evidence"]
     extras = ["peripheral_reason", "in_deg", "out_deg", "in_kzt", "out_kzt", "in_tx", "out_tx",
               "pagerank", "betweenness", "pass_through", "depth", "is_seed",
@@ -256,6 +262,58 @@ def write_outputs(df: pd.DataFrame, cluster_df: pd.DataFrame, out_dir: Path) -> 
     top[["rank", "gid", "role", "priority_score", "why"]].to_csv(out_dir / "top_nodes.csv", index=False)
 
 
+def write_graph(graph: nx.DiGraph, undirected: nx.Graph, df: pd.DataFrame,
+                edges: pd.DataFrame, tx: pd.DataFrame, out_dir: Path) -> None:
+    positions = {}
+    components = sorted(nx.connected_components(undirected),
+                        key=lambda component: (-len(component), min(component)))
+    for index, component in enumerate(components):
+        members = sorted(component)
+        if len(members) == 1:
+            local = {members[0]: (0.0, 0.0)}
+        else:
+            part = nx.Graph()
+            part.add_nodes_from(members)
+            for src, dst, attrs in sorted(undirected.subgraph(component).edges(data=True),
+                                          key=lambda item: (min(item[0], item[1]), max(item[0], item[1]))):
+                part.add_edge(src, dst, sum_kzt=attrs["sum_kzt"])
+            local = nx.spring_layout(part, seed=0, weight="sum_kzt")
+        column, row = index % 6, index // 6
+        for gid in members:
+            x, y = local[gid]
+            positions[gid] = (round(4 * column + float(x), 4),
+                              round(4 * row + float(y), 4))
+
+    payload = {
+        "meta": {
+            "n_nodes": len(df),
+            "n_edges": graph.number_of_edges(),
+            "n_seed": int(df.is_seed.sum()),
+            "n_tx": len(tx),
+            "total_kzt": round(float(edges.sum_kzt.sum())),
+            "period_start": str(tx.date.min().date()),
+            "period_end": str(tx.date.max().date()),
+            "min_transfer_kzt": 5000,
+        },
+        "nodes": [
+            {"gid": str(int(node.gid)), "role": node.role,
+             "cluster_id": int(node.cluster_id), "priority_score": float(node.priority_score),
+             "is_seed": bool(node.is_seed), "x": positions[int(node.gid)][0],
+             "y": positions[int(node.gid)][1]}
+            for node in df.sort_values("gid").itertuples(index=False)
+        ],
+        "edges": [
+            {"src": str(int(src)), "dst": str(int(dst)),
+             "sum_kzt": round(float(attrs["sum_kzt"])), "n_tx": int(attrs["n_tx"])}
+            for src, dst, attrs in sorted(graph.edges(data=True), key=lambda item: (item[0], item[1]))
+        ],
+    }
+    (out_dir / "graph.json").write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, default=Path("data"))
@@ -265,8 +323,19 @@ def main() -> None:
     sanity_check(edges, nodes, tx)
     graph = build_graph(edges.sort_values(["src", "dst"], kind="stable"))
     df = assign_priority(assign_roles(features(graph, nodes, tx)))
-    df, cluster_df = clusters(graph, df)
+    # Preserve the original numeric evidence before display-only rounding.
+    df["evidence"] = [evidence(row) for row in df.itertuples(index=False)]
+    for column in ("role_score", "priority_score", "pagerank", "betweenness",
+                   "pass_through", "matched_out_2d_share"):
+        df[column] = df[column].round(6)
+    # -1 means undefined: no eligible inbound.
+    df[["pass_through", "matched_out_2d_share"]] = df[
+        ["pass_through", "matched_out_2d_share"]].fillna(-1)
+    for column in ("in_kzt", "out_kzt"):
+        df[column] = np.rint(df[column]).astype(np.int64)
+    df, cluster_df, undirected = clusters(graph, df)
     write_outputs(df, cluster_df, args.out)
+    write_graph(graph, undirected, df, edges, tx, args.out)
     print("Roles:", df.role.value_counts().to_dict())
     print(f"Clusters: {len(cluster_df)}; outputs: {args.out}")
 

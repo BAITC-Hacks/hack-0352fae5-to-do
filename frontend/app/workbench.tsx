@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import type { MoneyCluster, MoneyNode } from "@/lib/money-data";
+import { useEffect, useMemo, useState } from "react";
+import { GraphMap } from "@/app/graph-map";
+import type { MoneyCluster, MoneyGraph, MoneyNode } from "@/lib/money-data";
 
 const ROLES = ["consolidator", "coordinator", "distributor", "transit", "terminal", "peripheral"] as const;
 const ROLE_LABEL: Record<string, string> = {
@@ -40,17 +41,23 @@ function Metric({ label, value, note }: { label: string; value: string; note?: s
 export function MoneyWorkbench({
   data,
 }: {
-  data: { nodes: MoneyNode[]; clusters: MoneyCluster[] } | null;
+  data: { nodes: MoneyNode[]; clusters: MoneyCluster[]; graph: MoneyGraph } | null;
 }) {
   const [roleFilter, setRoleFilter] = useState<string>("all");
   const [clusterFilter, setClusterFilter] = useState<number | null>(null);
   const [search, setSearch] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
   const [selectedGid, setSelectedGid] = useState<string | null>(null);
+  const [focusToken, setFocusToken] = useState(0);
   const [limit, setLimit] = useState(30);
   const [view, setView] = useState<"nodes" | "clusters">("nodes");
 
   const nodes = useMemo(() => data?.nodes ?? [], [data]);
   const clusters = useMemo(() => data?.clusters ?? [], [data]);
+  const graph = data?.graph;
+  const nodeByGid = useMemo(() => new Map(nodes.map((node) => [node.gid, node])), [nodes]);
+  const monthLabel = graph ? new Date(`${graph.meta.period_start}T00:00:00Z`).toLocaleDateString("en-US", { month: "short", year: "numeric", timeZone: "UTC" }) : "";
+  const longMonthLabel = graph ? new Date(`${graph.meta.period_start}T00:00:00Z`).toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" }) : "";
   const sortedNodes = useMemo(
     () => [...nodes].sort((a, b) => b.priority_score - a.priority_score || a.gid.localeCompare(b.gid)),
     [nodes],
@@ -62,16 +69,53 @@ export function MoneyWorkbench({
   }, [nodes]);
   const filteredNodes = useMemo(() => sortedNodes.filter((node) =>
     (roleFilter === "all" || node.role === roleFilter) &&
-    (clusterFilter === null || node.cluster_id === clusterFilter) &&
-    (!search.trim() || node.gid.includes(search.trim()))
-  ), [sortedNodes, roleFilter, clusterFilter, search]);
-  const selectedNode = nodes.find((node) => node.gid === selectedGid) ?? null;
+    (clusterFilter === null || node.cluster_id === clusterFilter)
+  ), [sortedNodes, roleFilter, clusterFilter]);
+  const suggestions = useMemo(() => {
+    if (!search) return [];
+    return [...nodes.filter((node) => node.gid.startsWith(search)),
+      ...nodes.filter((node) => !node.gid.startsWith(search) && node.gid.includes(search))].slice(0, 8);
+  }, [nodes, search]);
+  const selectedNode = selectedGid ? nodeByGid.get(selectedGid) ?? null : null;
+  const counterparties = useMemo(() => {
+    const incoming: MoneyGraph["edges"] = [];
+    const outgoing: MoneyGraph["edges"] = [];
+    if (selectedGid && graph) for (const edge of graph.edges) {
+      if (edge.dst === selectedGid) incoming.push(edge);
+      if (edge.src === selectedGid) outgoing.push(edge);
+    }
+    incoming.sort((a, b) => b.sum_kzt - a.sum_kzt || a.src.localeCompare(b.src));
+    outgoing.sort((a, b) => b.sum_kzt - a.sum_kzt || a.dst.localeCompare(b.dst));
+    return { incoming, outgoing };
+  }, [graph, selectedGid]);
   const selectedCluster = clusters.find((cluster) => cluster.cluster_id === selectedNode?.cluster_id);
   const rankedClusters = useMemo(() => [...clusters].sort((a, b) =>
     b.sum_kzt_internal - a.sum_kzt_internal || a.cluster_id - b.cluster_id
   ), [clusters]);
   const shownClusters = clusterFilter === null ? rankedClusters : rankedClusters.filter((cluster) => cluster.cluster_id === clusterFilter);
   const flagged = nodes.length - (roleCounts.peripheral ?? 0);
+
+  useEffect(() => {
+    if (selectedGid && view === "nodes") {
+      document.querySelector(".map-panel")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [selectedGid, focusToken, view]);
+
+  function selectNode(gid: string) {
+    if (!nodeByGid.has(gid)) return;
+    setSelectedGid(gid);
+    setFocusToken((current) => current + 1);
+    setSearch(gid);
+    setSearchOpen(false);
+    setView("nodes");
+  }
+
+  function handleSearch(value: string) {
+    const digits = value.replace(/\D/g, "");
+    setSearch(digits);
+    setSearchOpen(Boolean(digits));
+    if (digits.length === 18 && nodeByGid.has(digits)) selectNode(digits);
+  }
 
   function chooseRole(role: string) {
     setRoleFilter(role);
@@ -110,32 +154,56 @@ export function MoneyWorkbench({
         ))}
         <div className="sidebar-bottom">
           <div className="status-dot" />
-          <div><strong>{data ? "Analysis loaded" : "Awaiting analysis"}</strong><small>{data ? `${count(nodes.length)} accounts · 2026-07` : "Run the pipeline first"}</small></div>
+          <div><strong>{data ? "Analysis loaded" : "Awaiting analysis"}</strong><small>{data ? `${count(nodes.length)} accounts · ${monthLabel}` : "Run the pipeline first"}</small></div>
         </div>
       </aside>
 
       <div className="main-shell">
         <header className="topbar">
           <div className="breadcrumbs"><span>Workspace</span><span className="slash">/</span><strong>{view === "nodes" ? "Node explorer" : "Clusters"}</strong></div>
-          <div className="topbar-right"><span className="dataset-pill"><span /> JUL 2026 DATASET</span><span className="topbar-divider" /><span className="topbar-caption">Anonymized transfer network</span></div>
+          <div className="topbar-right">
+            <div className="global-search" onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setSearchOpen(false);
+            }}>
+              <span aria-hidden="true">⌕</span>
+              <input
+                aria-label="Find account by gid"
+                placeholder="Find account ID"
+                value={search}
+                onFocus={() => setSearchOpen(Boolean(search))}
+                onChange={(event) => handleSearch(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && suggestions[0]) selectNode(suggestions[0].gid);
+                  if (event.key === "Escape") setSearchOpen(false);
+                }}
+                inputMode="numeric"
+                autoComplete="off"
+              />
+              {searchOpen && search && <div className="search-suggestions" role="listbox" aria-label="Account suggestions">
+                {suggestions.length ? suggestions.map((node) => <button key={node.gid} role="option" aria-selected={false} onClick={() => selectNode(node.gid)}><span>{node.gid}</span><RoleTag role={node.role} /></button>) : <div className="search-empty">No account with this ID</div>}
+              </div>}
+            </div>
+            <span className="dataset-pill"><span /> {monthLabel.toUpperCase()} DATASET</span>
+            <span className="topbar-divider" /><span className="topbar-caption">Anonymized transfer network</span>
+          </div>
         </header>
 
         {!data ? (
           <main className="empty-state">
             <div className="empty-symbol">◎</div>
             <h1>Analysis output not found</h1>
-            <p>Generate the CSVs, then refresh this page to explore the network.</p>
+            <p>Generate the CSVs and graph.json, then refresh this page to explore the network.</p>
             <code>python pipeline/run.py --data data --out out</code>
           </main>
         ) : (
           <main className="main-content">
             <div className="intro-row">
-              <div><div className="eyebrow">MONEY GRAPH / JULY 2026</div><h1>{view === "nodes" ? "Follow the flow." : "Network clusters."}</h1><p>{view === "nodes" ? "Trace roles, review evidence, and decide where to investigate next." : "Explore communities in the undirected weighted projection of the transfer graph."}</p></div>
+              <div><div className="eyebrow">MONEY GRAPH / {longMonthLabel.toUpperCase()}</div><h1>{view === "nodes" ? "Follow the flow." : "Network clusters."}</h1><p>{view === "nodes" ? "Trace roles, review evidence, and decide where to investigate next." : "Explore communities in the undirected weighted projection of the transfer graph."}</p></div>
               <div className="scope-note"><span className="scope-icon">ⓘ</span><div><strong>Interpretation guide</strong><small>Roles and cluster findings are rule-based hypotheses. Depth 4 limits observed onward flow.</small></div></div>
             </div>
 
             <section className="stats-grid" aria-label="Network summary">
-              <Metric label="ACCOUNTS" value={count(nodes.length)} note="81 seed accounts" />
+              <Metric label="ACCOUNTS" value={count(nodes.length)} note={`${count(data.graph.meta.n_seed)} seed accounts`} />
               <Metric label="PRIORITIZED ROLES" value={count(flagged)} note="Beyond peripheral" />
               <Metric label="CONSOLIDATORS" value={count(roleCounts.consolidator ?? 0)} note="Potential collection points" />
               <Metric label="CLUSTERS" value={count(clusters.length)} note="Louvain communities" />
@@ -150,31 +218,53 @@ export function MoneyWorkbench({
             </section>
 
             {view === "nodes" ? (
+              <>
+              <GraphMap graph={data.graph} selectedGid={selectedGid} focusToken={focusToken} roleFilter={roleFilter} clusterFilter={clusterFilter} onSelect={selectNode} />
               <section className="data-panel">
                 <div className="panel-head table-heading"><div><span className="section-kicker">ANALYST QUEUE</span><h2>Explore accounts</h2></div><span className="panel-head-note">Sorted by analyst priority</span></div>
                 <div className="toolbar">
-                  <label className="search-box"><span aria-hidden="true">⌕</span><input aria-label="Search exact account ID" placeholder="Search by account ID" value={search} onChange={(event) => { setSearch(event.target.value); setLimit(30); }} inputMode="numeric" /></label>
                   <select aria-label="Filter by role" value={roleFilter} onChange={(event) => chooseRole(event.target.value)}><option value="all">All roles</option>{ROLES.map((role) => <option key={role} value={role}>{ROLE_LABEL[role]}</option>)}</select>
                   <select aria-label="Filter by cluster" value={clusterFilter ?? "all"} onChange={(event) => chooseCluster(event.target.value === "all" ? null : Number(event.target.value))}><option value="all">All clusters</option>{clusters.map((cluster) => <option key={cluster.cluster_id} value={cluster.cluster_id}>Cluster {cluster.cluster_id} · {cluster.n_nodes} nodes</option>)}</select>
                 </div>
                 <div className="table-meta"><strong>{count(filteredNodes.length)}</strong> accounts match {clusterFilter !== null && <button onClick={() => chooseCluster(null)}>Clear cluster {clusterFilter} ×</button>}</div>
                 <div className="table-wrap"><table><thead><tr><th>ACCOUNT ID</th><th>ROLE</th><th>CLUSTER</th><th>INFLOW</th><th>OUTFLOW</th><th>PRIORITY</th><th className="arrow-col" /></tr></thead><tbody>
-                  {filteredNodes.slice(0, limit).map((node) => <tr key={node.gid} onClick={() => setSelectedGid(node.gid)}><td className="gid-cell">{node.gid}{node.is_seed && <span className="seed-marker">SEED</span>}</td><td><RoleTag role={node.role} /></td><td className="subtle-cell">#{node.cluster_id}</td><td>{money(node.in_kzt)}</td><td>{money(node.out_kzt)}</td><td><div className="priority-cell"><span className="priority-bar"><span style={{ width: pct(node.priority_score) }} /></span><strong>{node.priority_score.toFixed(3)}</strong></div></td><td className="row-arrow">↗</td></tr>)}
+                  {filteredNodes.slice(0, limit).map((node) => <tr key={node.gid} onClick={() => selectNode(node.gid)}><td className="gid-cell">{node.gid}{node.is_seed && <span className="seed-marker">SEED</span>}</td><td><RoleTag role={node.role} /></td><td className="subtle-cell">#{node.cluster_id}</td><td>{money(node.in_kzt)}</td><td>{money(node.out_kzt)}</td><td><div className="priority-cell"><span className="priority-bar"><span style={{ width: pct(node.priority_score) }} /></span><strong>{node.priority_score.toFixed(3)}</strong></div></td><td className="row-arrow">↗</td></tr>)}
                 </tbody></table>{filteredNodes.length === 0 && <div className="no-results">No accounts match these filters.</div>}</div>
                 {limit < filteredNodes.length && <button className="load-more" onClick={() => setLimit((current) => current + 30)}>Show 30 more <span>↓</span></button>}
               </section>
+              </>
             ) : (
               <section className="data-panel">
                 <div className="panel-head table-heading"><div><span className="section-kicker">COMMUNITY VIEW</span><h2>Cluster overview</h2></div><span className="panel-head-note">{count(clusters.length)} communities</span></div>
                 <div className="cluster-grid">{shownClusters.map((cluster) => <article className="cluster-card" key={cluster.cluster_id}><div className="cluster-card-top"><span className="cluster-icon">◎</span><span className="cluster-id">CLUSTER {String(cluster.cluster_id).padStart(2, "0")}</span></div><h3>{count(cluster.n_nodes)} accounts</h3><p>{cluster.hypothesis}</p><div className="cluster-metrics"><div><small>INTERNAL FLOW</small><strong>{money(cluster.sum_kzt_internal)}</strong></div><div><small>SEEDS</small><strong>{cluster.n_seed}</strong></div></div><button onClick={() => chooseCluster(cluster.cluster_id)}>View accounts <span>↗</span></button></article>)}</div>
               </section>
             )}
-            <footer className="footer-note">Transfer values represent the observed graph only. Transfers below 5,000 KZT are outside this dataset.</footer>
+            <footer className="footer-note">Transfer values represent the observed graph only. Transfers below {money(data.graph.meta.min_transfer_kzt)} are outside this dataset.</footer>
           </main>
         )}
       </div>
 
-      {selectedNode && <div className="detail-backdrop" onClick={() => setSelectedGid(null)}><aside className="detail-drawer" role="dialog" aria-modal="true" aria-label={`Account ${selectedNode.gid}`} onClick={(event) => event.stopPropagation()}><div className="drawer-head"><div><span className="section-kicker">ACCOUNT DETAIL</span><h2>Node evidence</h2></div><button aria-label="Close account details" onClick={() => setSelectedGid(null)}>×</button></div><div className="drawer-body"><span className="drawer-gid-label">ANONYMIZED ACCOUNT ID</span><div className="drawer-gid">{selectedNode.gid}</div><div className="drawer-tags"><RoleTag role={selectedNode.role} />{selectedNode.is_seed && <span className="seed-chip">Seed account</span>}{selectedNode.truncated_by_depth && <span className="censor-chip">Depth 4 cutoff</span>}</div><div className="drawer-score"><div><small>ANALYST PRIORITY</small><strong>{selectedNode.priority_score.toFixed(3)}</strong></div><div><small>ROLE FIT</small><strong>{selectedNode.role_score.toFixed(3)}</strong></div></div><div className="drawer-section"><h3>Why this role?</h3><p className="evidence-text">{selectedNode.evidence}</p>{selectedNode.peripheral_reason && <p className="reason-text">Peripheral reason: {REASON_LABEL[selectedNode.peripheral_reason] ?? selectedNode.peripheral_reason}</p>}</div><div className="drawer-section"><h3>Observed activity</h3><div className="detail-stat-grid"><div><small>INCOMING</small><strong>{money(selectedNode.in_kzt)}</strong><span>{selectedNode.in_deg} payers · {selectedNode.in_tx} transfers</span></div><div><small>OUTGOING</small><strong>{money(selectedNode.out_kzt)}</strong><span>{selectedNode.out_deg} recipients · {selectedNode.out_tx} transfers</span></div><div><small>PASS-THROUGH</small><strong>{selectedNode.pass_through === null ? "—" : `${selectedNode.pass_through.toFixed(2)}×`}</strong><span>Outgoing / incoming</span></div><div><small>BETWEENNESS</small><strong>{selectedNode.betweenness.toFixed(6)}</strong><span>Directed shortest paths</span></div></div></div><div className="drawer-section"><h3>Context</h3><div className="context-row"><span>Cluster</span><button onClick={() => { chooseCluster(selectedNode.cluster_id); setSelectedGid(null); }}>#{selectedNode.cluster_id} ↗</button></div><div className="context-row"><span>Depth from seed</span><strong>{selectedNode.depth}</strong></div><div className="context-row"><span>Matched outflow within 2 days</span><strong>{selectedNode.matched_out_2d_share === null ? "—" : pct(selectedNode.matched_out_2d_share)}</strong></div>{selectedCluster && <p className="cluster-hypothesis">{selectedCluster.hypothesis}</p>}</div><p className="drawer-disclaimer">This classification is a hypothesis from observed transfers, not an allegation about the account holder.</p></div></aside></div>}
+      {selectedNode && <div className="detail-backdrop" onClick={() => setSelectedGid(null)}>
+        <aside key={selectedNode.gid} className="detail-drawer" role="dialog" aria-modal="true" aria-label={`Account ${selectedNode.gid}`} onClick={(event) => event.stopPropagation()}>
+          <div className="drawer-head"><div><span className="section-kicker">ACCOUNT DETAIL</span><h2>Node evidence</h2></div><button aria-label="Close account details" onClick={() => setSelectedGid(null)}>×</button></div>
+          <div className="drawer-body">
+            <span className="drawer-gid-label">ANONYMIZED ACCOUNT ID</span>
+            <div className="drawer-gid">{selectedNode.gid}</div>
+            <div className="drawer-tags"><RoleTag role={selectedNode.role} />{selectedNode.is_seed && <span className="seed-chip">Seed account</span>}{selectedNode.truncated_by_depth && <span className="censor-chip">Depth 4 cutoff</span>}</div>
+            <div className="drawer-score"><div><small>ANALYST PRIORITY</small><strong>{selectedNode.priority_score.toFixed(3)}</strong></div><div><small>ROLE FIT</small><strong>{selectedNode.role_score.toFixed(3)}</strong></div></div>
+            <div className="drawer-section"><h3>Why this role?</h3><p className="evidence-text">{selectedNode.evidence}</p>{selectedNode.role === "peripheral" && <p className="reason-text">Peripheral reason: {REASON_LABEL[selectedNode.peripheral_reason] ?? selectedNode.peripheral_reason}</p>}</div>
+            <div className="drawer-section"><h3>Observed activity</h3><div className="detail-stat-grid"><div><small>INCOMING</small><strong>{money(selectedNode.in_kzt)}</strong><span>{selectedNode.in_deg} payers · {selectedNode.in_tx} transfers</span></div><div><small>OUTGOING</small><strong>{money(selectedNode.out_kzt)}</strong><span>{selectedNode.out_deg} recipients · {selectedNode.out_tx} transfers</span></div><div><small>PASS-THROUGH</small><strong>{selectedNode.pass_through === null || selectedNode.pass_through < 0 ? "—" : `${selectedNode.pass_through.toFixed(2)}×`}</strong><span>Outgoing / incoming</span></div><div><small>BETWEENNESS</small><strong>{selectedNode.betweenness.toFixed(6)}</strong><span>Directed shortest paths</span></div></div></div>
+            <div className="drawer-section counterparties"><h3>Counterparties</h3>
+              <h4>Received from <span>{counterparties.incoming.length}</span></h4>
+              {counterparties.incoming.length ? counterparties.incoming.map((edge) => <button className="counterparty-row" key={`in-${edge.src}-${edge.dst}`} onClick={() => selectNode(edge.src)}><span className="counterparty-id">{edge.src}<RoleTag role={nodeByGid.get(edge.src)?.role ?? "peripheral"} /></span><span className="counterparty-amount">{money(edge.sum_kzt)}<small>{edge.n_tx} transfers</small></span></button>) : <p className="counterparty-empty">No observed incoming transfers.</p>}
+              <h4>Sent to <span>{counterparties.outgoing.length}</span></h4>
+              {counterparties.outgoing.length ? counterparties.outgoing.map((edge) => <button className="counterparty-row" key={`out-${edge.src}-${edge.dst}`} onClick={() => selectNode(edge.dst)}><span className="counterparty-id">{edge.dst}<RoleTag role={nodeByGid.get(edge.dst)?.role ?? "peripheral"} /></span><span className="counterparty-amount">{money(edge.sum_kzt)}<small>{edge.n_tx} transfers</small></span></button>) : <p className="counterparty-empty">No observed outgoing transfers.</p>}
+            </div>
+            <div className="drawer-section"><h3>Context</h3><div className="context-row"><span>Cluster</span><button onClick={() => { chooseCluster(selectedNode.cluster_id); setSelectedGid(null); }}>#{selectedNode.cluster_id} ↗</button></div><div className="context-row"><span>Depth from seed</span><strong>{selectedNode.depth}</strong></div><div className="context-row"><span>Matched outflow within 2 days</span><strong>{selectedNode.matched_out_2d_share === null || selectedNode.matched_out_2d_share < 0 ? "—" : pct(selectedNode.matched_out_2d_share)}</strong></div>{selectedCluster && <p className="cluster-hypothesis">{selectedCluster.hypothesis}</p>}</div>
+            <p className="drawer-disclaimer">This classification is a hypothesis from observed transfers, not an allegation about the account holder.</p>
+          </div>
+        </aside>
+      </div>}
     </div>
   );
 }
