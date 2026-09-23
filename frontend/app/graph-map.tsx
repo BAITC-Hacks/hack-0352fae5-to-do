@@ -4,13 +4,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MoneyGraph, MoneyNode } from "@/lib/money-data";
 import type { Language } from "@/app/workbench";
 
-export type GraphViewMode = "network" | "connections" | "cluster";
+export type GraphViewMode = "network" | "connections" | "cluster" | "route";
 type GraphNode = MoneyGraph["nodes"][number] & { px: number; py: number };
 type GraphEdge = MoneyGraph["edges"][number];
 type Camera = { scale: number; x: number; y: number };
 type Drag =
   | { kind: "pan"; sx: number; sy: number; camera: Camera; moved: boolean }
-  | { kind: "node"; gid: string; moved: boolean };
+  | { kind: "node"; gid: string; sx: number; sy: number; moved: boolean };
 
 const priorityColor = (score: number) =>
   score >= 0.85 ? "#d64545" : score >= 0.7 ? "#ea7a32" : score >= 0.5 ? "#e7b52c" : score >= 0.25 ? "#a8b83a" : "#35a65a";
@@ -81,7 +81,7 @@ function localLayout(selectedGid: string, graph: MoneyGraph): { nodes: GraphNode
 
 function staticLayout(
   graph: MoneyGraph,
-  mode: Exclude<GraphViewMode, "connections">,
+  mode: "network" | "cluster",
   selectedGid: string | null,
   details: Map<string, MoneyNode>,
 ): { nodes: GraphNode[]; edges: GraphEdge[] } {
@@ -95,7 +95,7 @@ function staticLayout(
   return { nodes: source.map((node) => ({ ...node, px: node.x * spread, py: node.y * spread })), edges };
 }
 
-export function GraphMap({ graph, nodeDetails, selectedGid, focusToken, mode, roleFilter, onSelect, language }: {
+export function GraphMap({ graph, nodeDetails, selectedGid, focusToken, mode, roleFilter, onSelect, language, routeGids }: {
   graph: MoneyGraph;
   nodeDetails: Map<string, MoneyNode>;
   selectedGid: string | null;
@@ -104,6 +104,7 @@ export function GraphMap({ graph, nodeDetails, selectedGid, focusToken, mode, ro
   roleFilter: string;
   onSelect: (gid: string) => void;
   language: Language;
+  routeGids?: string[];
 }) {
   const sectionRef = useRef<HTMLElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -118,10 +119,19 @@ export function GraphMap({ graph, nodeDetails, selectedGid, focusToken, mode, ro
   const t = COPY[language];
 
   const view = useMemo(() => {
+    if (mode === "route") {
+      const ids = routeGids ?? [];
+      const base = new Map(graph.nodes.map(node => [node.gid, node]));
+      const pairs = new Set(ids.slice(0, -1).map((src, i) => `${src}:${ids[i + 1]}`));
+      return {
+        nodes: ids.flatMap((gid, i) => { const node = base.get(gid); return node ? [{ ...node, px: i * 240, py: 0 }] : []; }),
+        edges: graph.edges.filter(edge => pairs.has(`${edge.src}:${edge.dst}`)),
+      };
+    }
     if (mode === "connections" && selectedGid) return localLayout(selectedGid, graph);
     if (mode === "connections") return { nodes: [] as GraphNode[], edges: [] as GraphEdge[] };
     return staticLayout(graph, mode, selectedGid, nodeDetails);
-  }, [graph, mode, selectedGid, nodeDetails]);
+  }, [graph, mode, selectedGid, nodeDetails, routeGids]);
   const viewIds = useMemo(() => new Set(view.nodes.map((node) => node.gid)), [view.nodes]);
   const neighbors = useMemo(() => {
     const map = new Map<string, Set<string>>();
@@ -213,8 +223,8 @@ export function GraphMap({ graph, nodeDetails, selectedGid, focusToken, mode, ro
       const b = point(target);
       const highlighted = Boolean(hovered && (edge.src === hovered || edge.dst === hovered));
       const selectedEdge = Boolean(selectedGid && (edge.src === selectedGid || edge.dst === selectedGid));
-      context.globalAlpha = hovered ? (highlighted ? 0.92 : 0.035) : mode === "connections" ? 0.7 : selectedEdge ? 0.5 : 0.075;
-      context.strokeStyle = selectedGid && edge.dst === selectedGid ? "#3077a8" : selectedGid && edge.src === selectedGid ? "#7255b8" : "#718086";
+      context.globalAlpha = mode === "route" ? 0.95 : hovered ? (highlighted ? 0.92 : 0.035) : mode === "connections" ? 0.7 : selectedEdge ? 0.5 : 0.075;
+      context.strokeStyle = mode === "route" ? "#13796e" : selectedGid && edge.dst === selectedGid ? "#3077a8" : selectedGid && edge.src === selectedGid ? "#7255b8" : "#718086";
       context.lineWidth = 0.7 + Math.min(2.3, Math.log10(Math.max(10, edge.sum_kzt)) / 4);
       const dx = b.x - a.x;
       const dy = b.y - a.y;
@@ -226,7 +236,7 @@ export function GraphMap({ graph, nodeDetails, selectedGid, focusToken, mode, ro
       context.moveTo(a.x, a.y);
       context.bezierCurveTo(control1.x, control1.y, control2.x, control2.y, b.x, b.y);
       context.stroke();
-      if (highlighted || (mode === "connections" && selectedEdge)) {
+      if (highlighted || selectedEdge || mode === "route") {
         const tangentX = b.x - control2.x;
         const tangentY = b.y - control2.y;
         const length = Math.hypot(tangentX, tangentY);
@@ -252,7 +262,7 @@ export function GraphMap({ graph, nodeDetails, selectedGid, focusToken, mode, ro
       const hover = node.gid === hovered;
       const connected = !hovered || hover || hoverNeighbors?.has(node.gid);
       const roleActive = roleFilter === "all" || node.role === roleFilter;
-      context.globalAlpha = selected || hover ? 1 : connected && roleActive ? 0.9 : 0.08;
+      context.globalAlpha = mode === "route" || selected || hover ? 1 : connected && roleActive ? 0.9 : 0.08;
       const zoomRadius = Math.min(1.9, Math.max(0.9, Math.sqrt(camera.scale / 0.45)));
       const radius = (selected ? 8.5 : hover ? 7.5 : 4 + node.priority_score * 4) * zoomRadius;
       context.fillStyle = priorityColor(node.priority_score);
@@ -266,11 +276,12 @@ export function GraphMap({ graph, nodeDetails, selectedGid, focusToken, mode, ro
         context.arc(p.x, p.y, radius + 3.5, 0, Math.PI * 2);
         context.stroke();
       }
-      if ((selected || hover) && camera.scale > 0.12) {
+      if ((selected || hover || mode === "route") && camera.scale > 0.12) {
         context.globalAlpha = 1;
         context.fillStyle = "#172126";
         context.font = "600 12px ui-monospace, monospace";
-        context.fillText(node.gid, p.x + radius + 8, p.y - radius - 2);
+        const label = mode === "route" && !hover ? `${view.nodes.indexOf(node) + 1} · …${node.gid.slice(-6)}` : node.gid;
+        context.fillText(label, p.x + radius + 8, p.y - radius - 2);
       }
     }
     context.globalAlpha = 1;
@@ -315,6 +326,7 @@ export function GraphMap({ graph, nodeDetails, selectedGid, focusToken, mode, ro
       <div className="canvas-wrap">
         <canvas
           ref={canvasRef}
+          aria-label={language === "ru" ? "Направленная карта переводов" : "Directed transfer map"}
           onWheel={(event) => {
             event.preventDefault();
             const bounds = event.currentTarget.getBoundingClientRect();
@@ -330,7 +342,7 @@ export function GraphMap({ graph, nodeDetails, selectedGid, focusToken, mode, ro
             const y = event.clientY - bounds.top;
             const node = nearest(x, y);
             event.currentTarget.setPointerCapture(event.pointerId);
-            interactionRef.current = node ? { kind: "node", gid: node.gid, moved: false } : { kind: "pan", sx: x, sy: y, camera: cameraRef.current, moved: false };
+            interactionRef.current = node ? { kind: "node", gid: node.gid, sx: x, sy: y, moved: false } : { kind: "pan", sx: x, sy: y, camera: cameraRef.current, moved: false };
           }}
           onPointerMove={(event) => {
             const bounds = event.currentTarget.getBoundingClientRect();
@@ -339,6 +351,7 @@ export function GraphMap({ graph, nodeDetails, selectedGid, focusToken, mode, ro
             const drag = interactionRef.current;
             if (!drag) { setHovered(nearest(x, y)?.gid ?? null); return; }
             if (drag.kind === "node") {
+              if (!drag.moved && Math.hypot(x - drag.sx, y - drag.sy) <= 3) return;
               drag.moved = true;
               overridesRef.current.set(drag.gid, { x: (x - cameraRef.current.x) / cameraRef.current.scale, y: (y - cameraRef.current.y) / cameraRef.current.scale });
               setLayoutVersion((value) => value + 1);
@@ -362,6 +375,7 @@ export function GraphMap({ graph, nodeDetails, selectedGid, focusToken, mode, ro
             if (node) { overridesRef.current.delete(node.gid); setLayoutVersion((value) => value + 1); }
           }}
           onPointerLeave={() => setHovered(null)}
+          onPointerCancel={() => { interactionRef.current = null; }}
         />
         {!viewIds.size && <div className="graph-empty">{t.localEmpty}</div>}
         {hoveredDetail && <div className="vertex-tooltip"><strong>{hoveredDetail.gid}</strong><div><span style={{ background: priorityColor(hoveredDetail.priority_score) }} />{t.priority} {hoveredDetail.priority_score.toFixed(3)}</div><dl><dt>{t.incoming}</dt><dd>{edgeCounts.incoming.get(hoveredDetail.gid) ?? 0}</dd><dt>{t.outgoing}</dt><dd>{edgeCounts.outgoing.get(hoveredDetail.gid) ?? 0}</dd><dt>{t.cluster}</dt><dd>#{hoveredDetail.cluster_id}</dd></dl><small>{t.move}</small></div>}

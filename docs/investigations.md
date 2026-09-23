@@ -1,10 +1,11 @@
-# Selected-account investigation: frontend handoff
+# Selected-account investigation: schema and viewer guide
 
 Run `python pipeline/run.py --data data --out out` from the repository root.
 The additive `out/investigations.json` export supports selecting an account,
 inspecting its seed routes, opening dated evidence, and reviewing next-data
-requests. No frontend integration is included in this change. Roles, priority
-scores, and the existing four export formats are unchanged.
+requests. The viewer integrates these in the selected account's inspector,
+with a directed route view on the map. Roles, priority scores, and the
+existing four export formats are unchanged.
 
 ## Load and associate the evidence
 
@@ -75,7 +76,7 @@ confidence ranking. The file contains all routes; the UI can paginate them.
 An empty list should say “No seed route found within four edges,” not “safe”
 or “unconnected.” All 19 isolated seeds remain selectable with empty routes.
 
-## Suggested interaction
+## Viewer interaction
 
 1. Use `accounts[selectedGid]` alongside the existing node detail. Show route
    and source-seed counts, followed by timing-labeled route cards.
@@ -85,6 +86,13 @@ or “unconnected.” All 19 isolated seeds remain selectable with empty routes.
    Provide “All transfers on this link” using `edge_transactions[src][dst]`.
 4. Show the account's next-data requests and the relevant coverage limitations.
    Requests are suggestions for analyst review; nothing is sent automatically.
+
+The inspector supports RU/EN labels, timing-category filters, and progressive
+route display (five at a time). Closing the inspector preserves the selected
+account and route; **Show details** restores it. Selecting a different account
+clears the route. **Clear route** returns to the account's direct links.
+The server checks schema/version, account coverage, string gids, transaction
+references, and the four companion hashes before passing evidence to the UI.
 
 Request codes are emitted in this fixed order when applicable:
 
@@ -125,5 +133,7 @@ Other reproducible examples:
 The supplied export has 2,248 accounts, 4,840 transaction records, and 11,353
 routes: 520 direct, 219 date-ordered, 240 same-day ambiguous, and 10,374
 structural-only. These are overlapping routes, not counts of laundering
-incidents. The export is about 2.9 MB uncompressed. Production still uses the
-existing frontend snapshot until this file is integrated and published.
+incidents. The export is about 2.9 MB uncompressed. The bundled snapshot now
+includes this file. To refresh it, run
+`python pipeline/run.py --data data --out frontend/data` from the root and
+publish the resulting viewer build; local changes do not update production.

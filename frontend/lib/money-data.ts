@@ -1,6 +1,9 @@
 import "server-only";
 
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { validInvestigations, type MoneyInvestigations } from "@/lib/investigation-data";
+export type { MoneyInvestigation, MoneyInvestigations } from "@/lib/investigation-data";
 import path from "node:path";
 
 export type MoneyNode = {
@@ -26,27 +29,18 @@ export type MoneyNode = {
   matched_out_2d_share: number | null;
   priority_why: string | null;
   top_rank: number | null;
+  distinct_counterparties: number;
+  priority_rank: number;
 };
 
-export type MoneyInvestigation = {
-  route_count: number;
-  source_seed_count: number;
-  routes: {
-    gids: string[];
-    timing_status: string;
-    witness_transaction_ids: string[];
-  }[];
-  next_data_requests: {
-    code: string;
-    reason: string;
-    requested_data: string;
-    transaction_ids?: string[];
-  }[];
-};
-
-export type MoneyInvestigations = {
-  meta?: { coverage_limitations?: string[] };
-  accounts: Record<string, MoneyInvestigation>;
+export type MoneyData = {
+  nodes: MoneyNode[];
+  clusters: MoneyCluster[];
+  graph: MoneyGraph;
+  investigations: MoneyInvestigations | null;
+  source: "pipeline" | "snapshot";
+  sourceWarning: string | null;
+  investigationStatus: "available" | "missing" | "invalid";
 };
 
 export type MoneyCluster = {
@@ -139,49 +133,41 @@ function bool(value: string): boolean {
   return value === "True" || value === "true" || value === "1";
 }
 
-export async function loadMoneyData(): Promise<{
-  nodes: MoneyNode[];
-  clusters: MoneyCluster[];
-  graph: MoneyGraph;
-  investigations: MoneyInvestigations | null;
-} | null> {
-  let nodeCsv: string;
-  let clusterCsv: string;
-  let graphJson: string;
-  let dataDirectory = "";
-  let found = false;
-  nodeCsv = "";
-  clusterCsv = "";
-  graphJson = "";
-  for (const directory of [path.resolve(process.cwd(), "../out"), path.resolve(process.cwd(), "data")]) {
-    try {
-      [nodeCsv, clusterCsv, graphJson] = await Promise.all([
-        readFile(path.join(directory, "nodes_roles.csv"), "utf8"),
-        readFile(path.join(directory, "clusters.csv"), "utf8"),
-        readFile(path.join(directory, "graph.json"), "utf8"),
-      ]);
-      found = true;
-      dataDirectory = directory;
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
+export async function loadMoneyData(): Promise<MoneyData | null> {
+  const requiredFiles = ["nodes_roles.csv", "clusters.csv", "top_nodes.csv", "graph.json"];
+  const outputDirectory = path.resolve(process.cwd(), "../out");
+  let outputFiles: string[] = [];
+  try {
+    outputFiles = await readdir(outputDirectory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  if (!found) return null;
-
-  let topRows: Record<string, string>[] = [];
+  const missing = requiredFiles.filter(file => !outputFiles.includes(file));
+  const source = missing.length ? "snapshot" : "pipeline";
+  const sourceWarning = source === "snapshot" && outputFiles.some(file => requiredFiles.includes(file))
+    ? missing.join(", ") : null;
+  const dataDirectory = source === "pipeline" ? outputDirectory : path.resolve(process.cwd(), "data");
+  let contents: string[];
+  try {
+    contents = await Promise.all(requiredFiles.map(file => readFile(path.join(dataDirectory, file), "utf8")));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  const [nodeCsv, clusterCsv, topCsv, graphJson] = contents;
+  const topRows = parseCsv(topCsv);
   let investigations: MoneyInvestigations | null = null;
+  let investigationStatus: MoneyData["investigationStatus"] = "missing";
   try {
-    topRows = parseCsv(await readFile(path.join(dataDirectory, "top_nodes.csv"), "utf8"));
+    const candidate: unknown = JSON.parse(await readFile(path.join(dataDirectory, "investigations.json"), "utf8"));
+    const hashes = Object.fromEntries(requiredFiles.map((name, i) => [name, createHash("sha256").update(contents[i]).digest("hex")]));
+    const gids = new Set(parseCsv(nodeCsv).map(row => row.gid));
+    if (validInvestigations(candidate, hashes, gids)) {
+      investigations = candidate;
+      investigationStatus = "available";
+    } else investigationStatus = "invalid";
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  try {
-    investigations = JSON.parse(
-      await readFile(path.join(dataDirectory, "investigations.json"), "utf8"),
-    ) as MoneyInvestigations;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") investigationStatus = "invalid";
   }
   const topByGid = new Map(topRows.map((row) => [row.gid, row]));
 
@@ -210,6 +196,8 @@ export async function loadMoneyData(): Promise<{
     matched_out_2d_share: optionalNumber(row.matched_out_2d_share),
     priority_why: top?.why || null,
     top_rank: top ? number(top.rank) : null,
+    distinct_counterparties: number(row.distinct_counterparties),
+    priority_rank: 0,
   });
   });
   const clusters = parseCsv(clusterCsv).map((row): MoneyCluster => ({
@@ -225,5 +213,7 @@ export async function loadMoneyData(): Promise<{
       !graph.edges.every((edge) => typeof edge.src === "string" && typeof edge.dst === "string")) {
     throw new Error("graph.json account IDs must be strings");
   }
-  return { nodes, clusters, graph, investigations };
+  [...nodes].sort((a, b) => b.priority_score - a.priority_score || a.gid.localeCompare(b.gid))
+    .forEach((node, index) => { node.priority_rank = index + 1; });
+  return { nodes, clusters, graph, investigations, source, sourceWarning, investigationStatus };
 }

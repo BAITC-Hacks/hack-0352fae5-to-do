@@ -8,10 +8,11 @@ This is the HackAlem AI **Analytics and Decision-Making / Cybersecurity and Comp
 
 - A local Python batch pipeline that reads the three supplied Parquet files and produces `nodes_roles.csv`, `clusters.csv`, `top_nodes.csv`, the viewer's `graph.json`, and `investigations.json` in one run.
 - One deterministic primary role per account, with numeric evidence, a role-fit score, and a separate analyst-priority score.
+- A ranked top-20 export whose `why` field explains the score using the observed amount, counterparties, hop depth, amount-weighted PageRank, and role multiplier; the viewer shows that explanation beside the selected account.
 - Louvain communities, with account count, seed count, internal observed turnover, leading gids, and a rule-based cluster hypothesis.
-- A Next.js viewer with a directed transfer map, gid search, role and cluster filters, a priority-sorted account table, and account details showing evidence, observed flows, and incoming/outgoing counterparties.
+- A Next.js viewer with a directed transfer map, gid search, role and cluster filters, a priority-sorted review queue, and account details showing evidence and observed flows.
 - A two-day matched-outflow measure from transaction dates. It supports interpretation of transit activity; it is **not** a role-assignment rule or proof that the same money moved onward.
-- A backend investigation export for any selected account: directed seed routes of up to four edges, dated transaction witnesses, and specific next-data requests. Frontend integration is pending; see the [investigation handoff](docs/investigations.md).
+- Selected-account investigation in the RU/EN viewer: directed seed routes of up to four edges, timing filters, route highlighting, dated transaction witnesses, all transfers on each link, and specific next-data requests. Closing account details keeps the map selection and active route. See the [investigation schema and walkthrough](docs/investigations.md).
 
 ## How it works
 
@@ -21,12 +22,12 @@ flowchart LR
     B --> C["Ordered role rules<br/>and role-fit scores"]
     B --> D["Undirected, weighted projection<br/>for Louvain communities"]
     C --> E["Analyst-priority ranking"]
-    D --> F["CSV exports and graph.json"]
+    D --> F["CSV exports, graph.json,<br/>and investigations.json"]
     E --> F
     F --> G["Next.js analyst viewer"]
 ```
 
-The analyst runs the pipeline, opens the viewer, checks the highest-priority accounts or searches for a supplied gid, then inspects the selected account's role evidence and the direction and amount of its observed links. The map and counterparty lists use the **directed** graph. Only community detection and map positioning use an undirected projection; reciprocal transfer amounts are added for clustering.
+The analyst runs the pipeline, opens the viewer, checks the highest-priority accounts or searches for a supplied gid, then inspects the selected account's role evidence and the direction and amount of its observed links. The map and investigation routes use the **directed** graph. Only community detection and map positioning use an undirected projection; reciprocal transfer amounts are added for clustering.
 
 ## Install and run
 
@@ -53,9 +54,11 @@ Open [http://localhost:3000](http://localhost:3000). A production build can be c
 
 The viewer first tries the complete output set in `../out/`, including `graph.json`. If any required file is absent there, it uses the committed `frontend/data/` snapshot. The viewer labels its active source and warns when local output files are incomplete. Run the pipeline before starting the viewer when you want to inspect a fresh calculation. The deployment uses the committed snapshot; changes to `out/` alone do not update it.
 
+Investigation evidence is loaded from that same directory only after schema, string-ID/reference, and companion-file SHA-256 checks. Missing or incompatible evidence leaves account analysis usable with an availability message. Refresh the bundled five-file snapshot with `python pipeline/run.py --data data --out frontend/data` from the root before publishing updated analysis.
+
 ## Reproducible judge walkthrough
 
-1. Run the installation and pipeline commands above. Check that `out/` contains `nodes_roles.csv`, `clusters.csv`, `top_nodes.csv`, and `graph.json`.
+1. Run the installation and pipeline commands above. Check that `out/` contains `nodes_roles.csv`, `clusters.csv`, `top_nodes.csv`, `graph.json`, and `investigations.json`.
    For a quick schema check from the repository root:
 
    ```bash
@@ -83,12 +86,13 @@ The viewer first tries the complete output set in `../out/`, including `graph.js
    print(f"OK: {len(nodes)} nodes, {len(clusters)} clusters, {len(top)} top nodes")
    PY
    ```
-2. Inspect `out/top_nodes.csv`, then start the viewer. The table is sorted by `priority_score`; the first account in the committed dataset is gid `100000003684369100`, a **coordinator**. Search for that gid to center it on the map, show its incoming and outgoing links, and open its detail panel. Its recorded directed betweenness is `0.002343`, above the coordinator threshold of `0.002`.
+2. Inspect `out/top_nodes.csv`, then start the viewer. The review queue is sorted by `priority_score`; the first account in the committed dataset is gid `100000003684369100`, a **coordinator**. Search for that gid to center it on the map, show its incoming and outgoing links, and open its detail panel. Its recorded directed betweenness is `0.002343`, above the coordinator threshold of `0.002`.
 3. Search for gid `100000004015047100`, a **consolidator**: 9 observed payers, 1 observed recipient, and 919,104 KZT observed inbound. Its evidence shows which thresholds it meets.
 4. Search for gid `100000000018102100`, a **peripheral** account at depth 4. Its zero observed out-degree is a traversal cutoff, so it is not labeled a terminal recipient.
-5. To inspect an arbitrary gid named by the jury, search its full identifier in the viewer. The detail panel shows its evidence and counterparties; the map highlights incoming and outgoing links. The same gid can be located in `out/nodes_roles.csv` for the underlying metrics.
+5. To inspect an arbitrary gid named by the jury, search its full identifier in the viewer. The detail panel shows its evidence and metrics; the map shows incoming and outgoing counterparties. The same gid can be located in `out/nodes_roles.csv` for the underlying metrics.
+6. Select a top-20 account and read its exported ranking explanation under **Why review** (switch to EN if needed). For gid `100000000343175100`, filter **Routes from seed accounts** to **Date-ordered** and select the route through `100000005339662100`. Inspect the July 16 transfer of 26,925 KZT and July 17 transfer of 28,100 KZT, then expand **All transfers on this link**. These dates support timing compatibility, not an amount match. Close and reopen account details: the selected account and route remain highlighted. Review **What data to request next**; requests are suggestions, not automatically sent.
 
-The three example gids and figures above are from the committed dataset. Recalculation uses the same supplied Parquet files and rules. All gids are int64 values greater than JavaScript's safe-integer limit; **treat them as strings in JSON and JavaScript** to preserve exact search and link matching.
+The example gids and figures above are from the supplied dataset. Recalculation uses the same Parquet files and rules. All gids are int64 values greater than JavaScript's safe-integer limit; **treat them as strings in JSON and JavaScript** to preserve exact search and link matching.
 
 ## Role criteria and scores
 
@@ -122,7 +126,7 @@ Here `amount` and `counterparties` are log-scaled and capped at their respective
 | `out/clusters.csv` | `cluster_id, n_nodes, n_seed, sum_kzt_internal, top_gids, hypothesis` | One row per Louvain community. `sum_kzt_internal` sums original directed edges whose endpoints are both in that community; `top_gids` is a JSON list of identifier strings. |
 | `out/top_nodes.csv` | `rank, gid, role, priority_score, why` | The 20 highest-priority accounts. Each `why` explains its rank and score with the observed amount, counterparties, hop depth, amount-weighted PageRank, and the contributions from the priority formula above. |
 | `out/graph.json` | `meta, nodes, edges` | Viewer data with string gids, directed links, roles, clusters, priority, and precomputed map positions. |
-| `out/investigations.json` | `meta, transactions, edge_transactions, accounts` | All accounts keyed by string gid; seed routes, timing classifications, transaction references, and next-data requests. Versioned metadata includes hashes of the four companion exports. The current viewer does not consume this file. |
+| `out/investigations.json` | `meta, transactions, edge_transactions, accounts` | All accounts keyed by string gid; seed routes, timing classifications, transaction references, and next-data requests. The viewer validates the version and companion-file hashes before exposing evidence. |
 
 `data/` contains the supplied, anonymized Parquet inputs. `starter/` is organizer-provided loading and base-metric code; `pipeline/run.py` adds role rules, ranking, temporal support, clustering, and exports. `frontend/lib/money-data.ts` loads and parses the outputs on the server, and `frontend/app/` renders the interactive viewer. `frontend/data/` holds the committed viewer snapshot. No AI model, LLM, external customer-enrichment source, third-party data API, or paid service is used by the analysis. Vercel hosts the supplied deployment of the viewer.
 
