@@ -1,6 +1,6 @@
 # Money Graph viewer
 
-The Next.js dashboard reads the analysis CSVs from `../out/` during local development. If those files are absent, it uses the committed snapshot in `data/`, which is included in the production server bundle.
+The Next.js dashboard reads the complete analysis output set (`nodes_roles.csv`, `clusters.csv`, `top_nodes.csv`, and `graph.json`) from `../out/` during local development. If any file is absent, it uses the committed snapshot in `data/`, which is included in the production server bundle. The page labels the active source and warns when local output is incomplete.
 
 From the repository root, regenerate the analysis when the parquet inputs or role rules change:
 

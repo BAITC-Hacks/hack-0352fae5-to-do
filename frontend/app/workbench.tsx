@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { GraphMap } from "@/app/graph-map";
-import type { MoneyCluster, MoneyGraph, MoneyNode } from "@/lib/money-data";
+import type { MoneyData, MoneyGraph } from "@/lib/money-data";
 
 const ROLES = ["consolidator", "coordinator", "distributor", "transit", "terminal", "peripheral"] as const;
 const ROLE_LABEL: Record<string, string> = {
@@ -41,12 +41,13 @@ function Metric({ label, value, note }: { label: string; value: string; note?: s
 export function MoneyWorkbench({
   data,
 }: {
-  data: { nodes: MoneyNode[]; clusters: MoneyCluster[]; graph: MoneyGraph } | null;
+  data: MoneyData | null;
 }) {
   const [roleFilter, setRoleFilter] = useState<string>("all");
   const [clusterFilter, setClusterFilter] = useState<number | null>(null);
   const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [activeSuggestion, setActiveSuggestion] = useState(0);
   const [selectedGid, setSelectedGid] = useState<string | null>(null);
   const [focusToken, setFocusToken] = useState(0);
   const [limit, setLimit] = useState(30);
@@ -106,6 +107,7 @@ export function MoneyWorkbench({
     setSelectedGid(gid);
     setFocusToken((current) => current + 1);
     setSearch(gid);
+    setActiveSuggestion(0);
     setSearchOpen(false);
     setView("nodes");
   }
@@ -113,8 +115,9 @@ export function MoneyWorkbench({
   function handleSearch(value: string) {
     const digits = value.replace(/\D/g, "");
     setSearch(digits);
+    setActiveSuggestion(0);
     setSearchOpen(Boolean(digits));
-    if (digits.length === 18 && nodeByGid.has(digits)) selectNode(digits);
+    if (nodeByGid.has(digits)) selectNode(digits);
   }
 
   function chooseRole(role: string) {
@@ -168,19 +171,34 @@ export function MoneyWorkbench({
               <span aria-hidden="true">⌕</span>
               <input
                 aria-label="Find account by gid"
+                role="combobox"
+                aria-autocomplete="list"
+                aria-expanded={searchOpen && Boolean(search)}
+                aria-controls={searchOpen && search ? "account-suggestions" : undefined}
+                aria-activedescendant={searchOpen && suggestions[activeSuggestion] ? `account-suggestion-${activeSuggestion}` : undefined}
                 placeholder="Find account ID"
                 value={search}
                 onFocus={() => setSearchOpen(Boolean(search))}
                 onChange={(event) => handleSearch(event.target.value)}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter" && suggestions[0]) selectNode(suggestions[0].gid);
+                  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                    event.preventDefault();
+                    setSearchOpen(Boolean(search));
+                    if (suggestions.length) setActiveSuggestion((current) =>
+                      searchOpen ? (current + (event.key === "ArrowDown" ? 1 : -1) + suggestions.length) % suggestions.length : event.key === "ArrowDown" ? 0 : suggestions.length - 1,
+                    );
+                  }
+                  if (event.key === "Enter" && searchOpen && suggestions[activeSuggestion]) {
+                    event.preventDefault();
+                    selectNode(suggestions[activeSuggestion].gid);
+                  }
                   if (event.key === "Escape") setSearchOpen(false);
                 }}
                 inputMode="numeric"
                 autoComplete="off"
               />
-              {searchOpen && search && <div className="search-suggestions" role="listbox" aria-label="Account suggestions">
-                {suggestions.length ? suggestions.map((node) => <button key={node.gid} role="option" aria-selected={false} onClick={() => selectNode(node.gid)}><span>{node.gid}</span><RoleTag role={node.role} /></button>) : <div className="search-empty">No account with this ID</div>}
+              {searchOpen && search && <div id="account-suggestions" className="search-suggestions" role="listbox" aria-label="Account suggestions">
+                {suggestions.length ? suggestions.map((node, index) => <button id={`account-suggestion-${index}`} key={node.gid} role="option" tabIndex={-1} aria-selected={index === activeSuggestion} onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setActiveSuggestion(index)} onClick={() => selectNode(node.gid)}><span>{node.gid}</span><RoleTag role={node.role} /></button>) : <div className="search-empty" role="status">No account with this ID</div>}
               </div>}
             </div>
             <span className="dataset-pill"><span /> {monthLabel.toUpperCase()} DATASET</span>
@@ -197,6 +215,10 @@ export function MoneyWorkbench({
           </main>
         ) : (
           <main className="main-content">
+            <div className={`source-status ${data.sourceWarning ? "source-warning" : ""}`} role="status">
+              <strong>{data.source === "pipeline" ? "Generated analysis" : "Bundled demo snapshot"}</strong>
+              {data.sourceWarning && <span>{data.sourceWarning}</span>}
+            </div>
             <div className="intro-row">
               <div><div className="eyebrow">MONEY GRAPH / {longMonthLabel.toUpperCase()}</div><h1>{view === "nodes" ? "Follow the flow." : "Network clusters."}</h1><p>{view === "nodes" ? "Trace roles, review evidence, and decide where to investigate next." : "Explore communities in the undirected weighted projection of the transfer graph."}</p></div>
               <div className="scope-note"><span className="scope-icon">ⓘ</span><div><strong>Interpretation guide</strong><small>Roles and cluster findings are rule-based hypotheses. Depth 4 limits observed onward flow.</small></div></div>
@@ -255,6 +277,8 @@ export function MoneyWorkbench({
             <div className="drawer-section"><h3>Why this role?</h3><p className="evidence-text">{selectedNode.evidence}</p>{selectedNode.role === "peripheral" && <p className="reason-text">Peripheral reason: {REASON_LABEL[selectedNode.peripheral_reason] ?? selectedNode.peripheral_reason}</p>}</div>
             <div className="drawer-section"><h3>Observed activity</h3><div className="detail-stat-grid"><div><small>INCOMING</small><strong>{money(selectedNode.in_kzt)}</strong><span>{selectedNode.in_deg} payers · {selectedNode.in_tx} transfers</span></div><div><small>OUTGOING</small><strong>{money(selectedNode.out_kzt)}</strong><span>{selectedNode.out_deg} recipients · {selectedNode.out_tx} transfers</span></div><div><small>PASS-THROUGH</small><strong>{selectedNode.pass_through === null || selectedNode.pass_through < 0 ? "—" : `${selectedNode.pass_through.toFixed(2)}×`}</strong><span>Outgoing / incoming</span></div><div><small>BETWEENNESS</small><strong>{selectedNode.betweenness.toFixed(6)}</strong><span>Directed shortest paths</span></div></div></div>
             <div className="drawer-section counterparties"><h3>Counterparties</h3>
+              {selectedNode.is_seed && <p className="reason-text">Seed inbound is understated because traversal starts from seeds. Inflow and pass-through do not determine this account’s role.</p>}
+              {selectedNode.truncated_by_depth && <p className="reason-text">Traversal stops at depth 4. Missing onward transfers do not establish that funds stopped here.</p>}
               <h4>Received from <span>{counterparties.incoming.length}</span></h4>
               {counterparties.incoming.length ? counterparties.incoming.map((edge) => <button className="counterparty-row" key={`in-${edge.src}-${edge.dst}`} onClick={() => selectNode(edge.src)}><span className="counterparty-id">{edge.src}<RoleTag role={nodeByGid.get(edge.src)?.role ?? "peripheral"} /></span><span className="counterparty-amount">{money(edge.sum_kzt)}<small>{edge.n_tx} transfers</small></span></button>) : <p className="counterparty-empty">No observed incoming transfers.</p>}
               <h4>Sent to <span>{counterparties.outgoing.length}</span></h4>
