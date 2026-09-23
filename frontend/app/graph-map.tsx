@@ -1,258 +1,372 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { MoneyGraph } from "@/lib/money-data";
+import type { MoneyGraph, MoneyNode } from "@/lib/money-data";
+import type { Language } from "@/app/workbench";
 
-type Camera = { scale: number; offsetX: number; offsetY: number };
-type MapSize = { width: number; height: number };
+export type GraphViewMode = "network" | "connections" | "cluster";
+type GraphNode = MoneyGraph["nodes"][number] & { px: number; py: number };
+type GraphEdge = MoneyGraph["edges"][number];
+type Camera = { scale: number; x: number; y: number };
+type Drag =
+  | { kind: "pan"; sx: number; sy: number; camera: Camera; moved: boolean }
+  | { kind: "node"; gid: string; moved: boolean };
 
-const ROLE_COLOR: Record<string, string> = {
-  consolidator: "#10a58c",
-  coordinator: "#628ee6",
-  distributor: "#d29a48",
-  transit: "#8b72c9",
-  terminal: "#a8b883",
-  peripheral: "#a6b8bc",
-};
-const INCOMING = "#327bd2";
-const OUTGOING = "#d78827";
+const priorityColor = (score: number) =>
+  score >= 0.85 ? "#d64545" : score >= 0.7 ? "#ea7a32" : score >= 0.5 ? "#e7b52c" : score >= 0.25 ? "#a8b83a" : "#35a65a";
 
-export function GraphMap({
-  graph,
-  selectedGid,
-  focusToken,
-  roleFilter,
-  clusterFilter,
-  onSelect,
-}: {
+const COPY = {
+  ru: {
+    hint: "Наведите на счёт, чтобы выделить его связи · нажмите, чтобы выбрать",
+    full: "На весь экран",
+    exit: "Выйти",
+    fit: "Вписать",
+    incoming: "Входящих",
+    outgoing: "Исходящих",
+    priority: "Приоритет",
+    cluster: "Кластер",
+    localEmpty: "Выберите счёт — здесь появятся только его прямые связи",
+    move: "Узел можно перетащить · двойной клик вернёт его на место",
+  },
+  en: {
+    hint: "Hover to highlight links · click to select an account",
+    full: "Fullscreen",
+    exit: "Exit",
+    fit: "Fit",
+    incoming: "Incoming",
+    outgoing: "Outgoing",
+    priority: "Priority",
+    cluster: "Cluster",
+    localEmpty: "Select an account to see only its direct links",
+    move: "Drag a node · double-click restores its position",
+  },
+} as const;
+
+function localLayout(selectedGid: string, graph: MoneyGraph): { nodes: GraphNode[]; edges: GraphEdge[] } {
+  const incident = graph.edges.filter((edge) => edge.src === selectedGid || edge.dst === selectedGid);
+  const incoming = new Map<string, number>();
+  const outgoing = new Map<string, number>();
+  for (const edge of incident) {
+    if (edge.dst === selectedGid) incoming.set(edge.src, (incoming.get(edge.src) ?? 0) + edge.sum_kzt);
+    if (edge.src === selectedGid) outgoing.set(edge.dst, (outgoing.get(edge.dst) ?? 0) + edge.sum_kzt);
+  }
+  const left = [...incoming].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const right = [...outgoing]
+    .filter(([gid]) => !incoming.has(gid))
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const base = new Map(graph.nodes.map((node) => [node.gid, node]));
+  const positions = new Map<string, { x: number; y: number }>([[selectedGid, { x: 0, y: 0 }]]);
+
+  function place(items: [string, number][], direction: -1 | 1) {
+    const rows = 14;
+    items.forEach(([gid], index) => {
+      const column = Math.floor(index / rows);
+      const row = index % rows;
+      const inLastColumn = Math.min(rows, items.length - column * rows);
+      positions.set(gid, {
+        x: direction * (260 + column * 150),
+        y: (row - (inLastColumn - 1) / 2) * 48 + (column % 2 ? 18 : 0),
+      });
+    });
+  }
+  place(left, -1);
+  place(right, 1);
+
+  const nodes = [...positions].flatMap(([gid, point]) => {
+    const node = base.get(gid);
+    return node ? [{ ...node, px: point.x, py: point.y }] : [];
+  });
+  return { nodes, edges: incident };
+}
+
+function staticLayout(
+  graph: MoneyGraph,
+  mode: Exclude<GraphViewMode, "connections">,
+  selectedGid: string | null,
+  details: Map<string, MoneyNode>,
+): { nodes: GraphNode[]; edges: GraphEdge[] } {
+  const selectedCluster = selectedGid ? details.get(selectedGid)?.cluster_id : undefined;
+  const source = mode === "cluster" && selectedCluster !== undefined
+    ? graph.nodes.filter((node) => node.cluster_id === selectedCluster)
+    : graph.nodes;
+  const ids = new Set(source.map((node) => node.gid));
+  const edges = graph.edges.filter((edge) => ids.has(edge.src) && ids.has(edge.dst));
+  const spread = mode === "cluster" ? 180 : 230;
+  return { nodes: source.map((node) => ({ ...node, px: node.x * spread, py: node.y * spread })), edges };
+}
+
+export function GraphMap({ graph, nodeDetails, selectedGid, focusToken, mode, roleFilter, onSelect, language }: {
   graph: MoneyGraph;
+  nodeDetails: Map<string, MoneyNode>;
   selectedGid: string | null;
   focusToken: number;
+  mode: GraphViewMode;
   roleFilter: string;
-  clusterFilter: number | null;
   onSelect: (gid: string) => void;
+  language: Language;
 }) {
+  const sectionRef = useRef<HTMLElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const gesture = useRef<{ x: number; y: number; camera: Camera; moved: boolean } | null>(null);
-  const [size, setSize] = useState<MapSize>({ width: 0, height: 0 });
-  const [cameraOverride, setCameraOverride] = useState<{ key: string; camera: Camera } | null>(null);
-  const byGid = useMemo(() => new Map(graph.nodes.map((node) => [node.gid, node])), [graph.nodes]);
-  const bounds = useMemo(() => {
-    const xs = graph.nodes.map((node) => node.x);
-    const ys = graph.nodes.map((node) => node.y);
-    return {
-      minX: Math.min(...xs), maxX: Math.max(...xs),
-      minY: Math.min(...ys), maxY: Math.max(...ys),
-    };
-  }, [graph.nodes]);
-  const maxAmount = useMemo(() => Math.max(1, ...graph.edges.map((edge) => edge.sum_kzt)), [graph.edges]);
-  const linked = useMemo(() => {
-    const neighbors = new Set<string>();
-    const incoming: MoneyGraph["edges"] = [];
-    const outgoing: MoneyGraph["edges"] = [];
-    if (selectedGid) {
-      for (const edge of graph.edges) {
-        if (edge.dst === selectedGid) { incoming.push(edge); neighbors.add(edge.src); }
-        if (edge.src === selectedGid) { outgoing.push(edge); neighbors.add(edge.dst); }
-      }
+  const overridesRef = useRef(new Map<string, { x: number; y: number }>());
+  const interactionRef = useRef<Drag | null>(null);
+  const cameraRef = useRef<Camera>({ scale: 1, x: 0, y: 0 });
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  const [camera, setCamera] = useState<Camera>({ scale: 1, x: 0, y: 0 });
+  const [hovered, setHovered] = useState<string | null>(null);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [layoutVersion, setLayoutVersion] = useState(0);
+  const t = COPY[language];
+
+  const view = useMemo(() => {
+    if (mode === "connections" && selectedGid) return localLayout(selectedGid, graph);
+    if (mode === "connections") return { nodes: [] as GraphNode[], edges: [] as GraphEdge[] };
+    return staticLayout(graph, mode, selectedGid, nodeDetails);
+  }, [graph, mode, selectedGid, nodeDetails]);
+  const viewIds = useMemo(() => new Set(view.nodes.map((node) => node.gid)), [view.nodes]);
+  const neighbors = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    for (const node of view.nodes) map.set(node.gid, new Set());
+    for (const edge of view.edges) {
+      map.get(edge.src)?.add(edge.dst);
+      map.get(edge.dst)?.add(edge.src);
     }
-    return { neighbors, incoming, outgoing };
-  }, [graph.edges, selectedGid]);
+    return map;
+  }, [view]);
+  const edgeCounts = useMemo(() => {
+    const incoming = new Map<string, number>();
+    const outgoing = new Map<string, number>();
+    for (const edge of graph.edges) {
+      incoming.set(edge.dst, (incoming.get(edge.dst) ?? 0) + 1);
+      outgoing.set(edge.src, (outgoing.get(edge.src) ?? 0) + 1);
+    }
+    return { incoming, outgoing };
+  }, [graph.edges]);
 
-  const fittedCamera = useCallback((width = size.width, height = size.height): Camera => {
-    if (!width || !height) return { scale: 1, offsetX: 0, offsetY: 0 };
-    const spanX = Math.max(1, bounds.maxX - bounds.minX);
-    const spanY = Math.max(1, bounds.maxY - bounds.minY);
-    const scale = Math.min((width - 52) / spanX, (height - 52) / spanY);
-    return {
-      scale,
-      offsetX: width / 2 - ((bounds.minX + bounds.maxX) / 2) * scale,
-      offsetY: height / 2 - ((bounds.minY + bounds.maxY) / 2) * scale,
+  const position = useCallback((node: GraphNode) => overridesRef.current.get(node.gid) ?? { x: node.px, y: node.py }, []);
+  const fit = useCallback(() => {
+    if (!view.nodes.length || !size.width || !size.height) return;
+    const points = view.nodes.map(position);
+    const minX = Math.min(...points.map((point) => point.x));
+    const maxX = Math.max(...points.map((point) => point.x));
+    const minY = Math.min(...points.map((point) => point.y));
+    const maxY = Math.max(...points.map((point) => point.y));
+    const margin = mode === "connections" ? 90 : 70;
+    const scale = Math.min((size.width - margin * 2) / Math.max(100, maxX - minX), (size.height - margin * 2) / Math.max(100, maxY - minY));
+    const next = {
+      scale: Math.max(0.035, Math.min(mode === "connections" ? 1.7 : 3.5, scale)),
+      x: size.width / 2 - ((minX + maxX) / 2) * scale,
+      y: size.height / 2 - ((minY + maxY) / 2) * scale,
     };
-  }, [bounds, size.width, size.height]);
-
-  const focusKey = `${selectedGid ?? ""}:${focusToken}:${size.width}:${size.height}`;
-  const baseCamera = useMemo(() => {
-    const focusedNode = selectedGid ? byGid.get(selectedGid) : null;
-    if (!focusedNode) return fittedCamera();
-    const distances = [...linked.neighbors].map((gid) => byGid.get(gid)).filter((node) => node !== undefined)
-      .map((node) => Math.hypot(node.x - focusedNode.x, node.y - focusedNode.y)).sort((a, b) => a - b);
-    const radius = distances[Math.floor(distances.length * 0.9)] ?? 0;
-    const scale = Math.min(1200, Math.max(350, radius ? size.height * 0.34 / radius : 700));
-    return { scale, offsetX: size.width / 2 - focusedNode.x * scale,
-      offsetY: size.height / 2 - focusedNode.y * scale };
-  }, [selectedGid, byGid, fittedCamera, linked.neighbors, size.width, size.height]);
-  const camera = cameraOverride?.key === focusKey ? cameraOverride.camera : baseCamera;
+    cameraRef.current = next;
+    setCamera(next);
+  }, [mode, position, size, view.nodes]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const observer = new ResizeObserver(([entry]) => {
-      const width = entry.contentRect.width;
-      const height = entry.contentRect.height;
-      setSize((current) => current.width === width && current.height === height ? current : { width, height });
-    });
+    const observer = new ResizeObserver(([entry]) => setSize({ width: entry.contentRect.width, height: entry.contentRect.height }));
     observer.observe(canvas);
     return () => observer.disconnect();
   }, []);
-
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !size.width || !size.height) return;
-    const ratio = window.devicePixelRatio || 1;
-    canvas.width = Math.round(size.width * ratio);
-    canvas.height = Math.round(size.height * ratio);
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    const handler = () => setFullscreen(document.fullscreenElement === sectionRef.current);
+    document.addEventListener("fullscreenchange", handler);
+    return () => document.removeEventListener("fullscreenchange", handler);
+  }, []);
+  useEffect(() => {
+    overridesRef.current.clear();
     const frame = requestAnimationFrame(() => {
-      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-      ctx.clearRect(0, 0, size.width, size.height);
-      ctx.fillStyle = "#fbfdfc";
-      ctx.fillRect(0, 0, size.width, size.height);
-      const point = (node: MoneyGraph["nodes"][number]) => ({
-        x: node.x * camera.scale + camera.offsetX,
-        y: node.y * camera.scale + camera.offsetY,
-      });
-      const drawEdge = (edge: MoneyGraph["edges"][number], color: string, alpha: number, extraWidth = 0) => {
-        const source = byGid.get(edge.src);
-        const target = byGid.get(edge.dst);
-        if (!source || !target) return;
-        const a = point(source);
-        const b = point(target);
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const length = Math.hypot(dx, dy);
-        if (length < 3) return;
-        const ux = dx / length;
-        const uy = dy / length;
-        const endX = b.x - ux * (extraWidth ? 8 : 4);
-        const endY = b.y - uy * (extraWidth ? 8 : 4);
-        ctx.globalAlpha = alpha;
-        ctx.strokeStyle = color;
-        ctx.fillStyle = color;
-        ctx.lineWidth = 0.45 + Math.log1p(edge.sum_kzt) / Math.log1p(maxAmount) * 1.4 + extraWidth;
-        ctx.beginPath();
-        ctx.moveTo(a.x, a.y);
-        ctx.lineTo(endX, endY);
-        ctx.stroke();
-        const arrow = extraWidth ? 6 : 3;
-        ctx.beginPath();
-        ctx.moveTo(endX, endY);
-        ctx.lineTo(endX - ux * arrow - uy * arrow * 0.55, endY - uy * arrow + ux * arrow * 0.55);
-        ctx.lineTo(endX - ux * arrow + uy * arrow * 0.55, endY - uy * arrow - ux * arrow * 0.55);
-        ctx.closePath();
-        ctx.fill();
-      };
-
-      for (const edge of graph.edges) drawEdge(edge, "#708c91", selectedGid ? 0.025 : 0.16);
-      if (selectedGid) {
-        for (const edge of linked.incoming) drawEdge(edge, INCOMING, 0.95, 1.5);
-        for (const edge of linked.outgoing) drawEdge(edge, OUTGOING, 0.95, 1.5);
-      }
-      for (const node of graph.nodes) {
-        const { x, y } = point(node);
-        if (x < -12 || y < -12 || x > size.width + 12 || y > size.height + 12) continue;
-        const isSelected = node.gid === selectedGid;
-        const isNeighbor = linked.neighbors.has(node.gid);
-        const matchesFilter = (roleFilter === "all" || node.role === roleFilter) &&
-          (clusterFilter === null || node.cluster_id === clusterFilter);
-        ctx.globalAlpha = isSelected ? 1 : selectedGid ? (isNeighbor && matchesFilter ? 0.95 : isNeighbor ? 0.18 : 0.08) : matchesFilter ? 0.9 : 0.09;
-        ctx.fillStyle = ROLE_COLOR[node.role] ?? "#a6b8bc";
-        ctx.beginPath();
-        ctx.arc(x, y, isSelected ? 8 : isNeighbor ? 5.5 : 2.4 + node.priority_score * 1.5, 0, Math.PI * 2);
-        ctx.fill();
-        if (node.is_seed || isSelected) {
-          ctx.strokeStyle = isSelected ? "#173b42" : "#2d5760";
-          ctx.lineWidth = isSelected ? 2 : 1.2;
-          ctx.beginPath();
-          ctx.arc(x, y, isSelected ? 11 : 5.6 + node.priority_score * 1.5, 0, Math.PI * 2);
-          ctx.stroke();
-        }
-      }
-      if (selectedGid) {
-        const node = byGid.get(selectedGid);
-        if (node) {
-          const { x, y } = point(node);
-          ctx.globalAlpha = 1;
-          ctx.fillStyle = "#173b42";
-          ctx.font = "600 11px ui-monospace, monospace";
-          ctx.fillText(selectedGid, x + 16, y - 10);
-        }
-      }
-      ctx.globalAlpha = 1;
+      setHovered(null);
+      fit();
     });
     return () => cancelAnimationFrame(frame);
-  }, [graph, byGid, camera, size, selectedGid, linked, roleFilter, clusterFilter, maxAmount]);
+  }, [fit, focusToken, mode, selectedGid]);
 
-  useEffect(() => {
+  const draw = useCallback(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    const wheel = (event: WheelEvent) => {
-      event.preventDefault();
-      const rect = canvas.getBoundingClientRect();
-      const x = event.clientX - rect.left;
-      const y = event.clientY - rect.top;
-      const factor = Math.exp(-event.deltaY * 0.001);
-      setCameraOverride((currentOverride) => {
-        const current = currentOverride?.key === focusKey ? currentOverride.camera : baseCamera;
-        const scale = Math.min(1200, Math.max(4, current.scale * factor));
-        const ratio = scale / current.scale;
-        return { key: focusKey, camera: { scale, offsetX: x - (x - current.offsetX) * ratio, offsetY: y - (y - current.offsetY) * ratio } };
-      });
-    };
-    canvas.addEventListener("wheel", wheel, { passive: false });
-    return () => canvas.removeEventListener("wheel", wheel);
-  }, [focusKey, baseCamera]);
-
-  function selectAt(x: number, y: number) {
-    let nearest: string | null = null;
-    let distance = 12 * 12;
-    for (const node of graph.nodes) {
-      const dx = node.x * camera.scale + camera.offsetX - x;
-      const dy = node.y * camera.scale + camera.offsetY - y;
-      const squared = dx * dx + dy * dy;
-      if (squared < distance) { distance = squared; nearest = node.gid; }
+    if (!canvas || !size.width || !size.height) return;
+    const ratio = Math.min(window.devicePixelRatio || 1, 1.5);
+    const pixelWidth = Math.round(size.width * ratio);
+    const pixelHeight = Math.round(size.height * ratio);
+    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+      canvas.width = pixelWidth;
+      canvas.height = pixelHeight;
     }
-    if (nearest) onSelect(nearest);
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    context.clearRect(0, 0, size.width, size.height);
+    context.fillStyle = "#fbfcfb";
+    context.fillRect(0, 0, size.width, size.height);
+    const nodeById = new Map(view.nodes.map((node) => [node.gid, node]));
+    const hoverNeighbors = hovered ? neighbors.get(hovered) : undefined;
+    const point = (node: GraphNode) => {
+      const p = position(node);
+      return { x: p.x * camera.scale + camera.x, y: p.y * camera.scale + camera.y };
+    };
+
+    for (const edge of view.edges) {
+      const source = nodeById.get(edge.src);
+      const target = nodeById.get(edge.dst);
+      if (!source || !target) continue;
+      const a = point(source);
+      const b = point(target);
+      const highlighted = Boolean(hovered && (edge.src === hovered || edge.dst === hovered));
+      const selectedEdge = Boolean(selectedGid && (edge.src === selectedGid || edge.dst === selectedGid));
+      context.globalAlpha = hovered ? (highlighted ? 0.92 : 0.035) : mode === "connections" ? 0.7 : selectedEdge ? 0.5 : 0.075;
+      context.strokeStyle = selectedGid && edge.dst === selectedGid ? "#3077a8" : selectedGid && edge.src === selectedGid ? "#7255b8" : "#718086";
+      context.lineWidth = 0.7 + Math.min(2.3, Math.log10(Math.max(10, edge.sum_kzt)) / 4);
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const lane = [...`${edge.src}:${edge.dst}`].reduce((sum, char) => sum + char.charCodeAt(0), 0) % 9 - 4;
+      const bend = mode === "connections" ? (dy >= 0 ? 1 : -1) * (14 + Math.abs(lane) * 3) : lane * 2.5;
+      const control1 = { x: a.x + dx * 0.34, y: a.y + dy * 0.14 + bend };
+      const control2 = { x: a.x + dx * 0.68, y: b.y - dy * 0.14 + bend };
+      context.beginPath();
+      context.moveTo(a.x, a.y);
+      context.bezierCurveTo(control1.x, control1.y, control2.x, control2.y, b.x, b.y);
+      context.stroke();
+      if (highlighted || (mode === "connections" && selectedEdge)) {
+        const tangentX = b.x - control2.x;
+        const tangentY = b.y - control2.y;
+        const length = Math.hypot(tangentX, tangentY);
+        if (length > 10) {
+          const ux = tangentX / length;
+          const uy = tangentY / length;
+          const x = b.x - ux * 9;
+          const y = b.y - uy * 9;
+          context.fillStyle = context.strokeStyle;
+          context.beginPath();
+          context.moveTo(x, y);
+          context.lineTo(x - ux * 7 - uy * 3.5, y - uy * 7 + ux * 3.5);
+          context.lineTo(x - ux * 7 + uy * 3.5, y - uy * 7 - ux * 3.5);
+          context.fill();
+        }
+      }
+    }
+
+    for (const node of view.nodes) {
+      const p = point(node);
+      if (p.x < -24 || p.y < -24 || p.x > size.width + 24 || p.y > size.height + 24) continue;
+      const selected = node.gid === selectedGid;
+      const hover = node.gid === hovered;
+      const connected = !hovered || hover || hoverNeighbors?.has(node.gid);
+      const roleActive = roleFilter === "all" || node.role === roleFilter;
+      context.globalAlpha = selected || hover ? 1 : connected && roleActive ? 0.9 : 0.08;
+      const zoomRadius = Math.min(1.9, Math.max(0.9, Math.sqrt(camera.scale / 0.45)));
+      const radius = (selected ? 8.5 : hover ? 7.5 : 4 + node.priority_score * 4) * zoomRadius;
+      context.fillStyle = priorityColor(node.priority_score);
+      context.beginPath();
+      context.arc(p.x, p.y, radius, 0, Math.PI * 2);
+      context.fill();
+      if (node.is_seed || selected || hover) {
+        context.strokeStyle = selected ? "#142126" : "#52636a";
+        context.lineWidth = selected ? 2.6 : 1.3;
+        context.beginPath();
+        context.arc(p.x, p.y, radius + 3.5, 0, Math.PI * 2);
+        context.stroke();
+      }
+      if ((selected || hover) && camera.scale > 0.12) {
+        context.globalAlpha = 1;
+        context.fillStyle = "#172126";
+        context.font = "600 12px ui-monospace, monospace";
+        context.fillText(node.gid, p.x + radius + 8, p.y - radius - 2);
+      }
+    }
+    context.globalAlpha = 1;
+  }, [camera, hovered, mode, neighbors, position, roleFilter, selectedGid, size, view]);
+
+  useEffect(draw, [draw, layoutVersion]);
+
+  const nearest = useCallback((screenX: number, screenY: number, maximum = 18) => {
+    let result: GraphNode | undefined;
+    let best = maximum * maximum;
+    for (const node of view.nodes) {
+      const p = position(node);
+      const dx = p.x * cameraRef.current.scale + cameraRef.current.x - screenX;
+      const dy = p.y * cameraRef.current.scale + cameraRef.current.y - screenY;
+      const distance = dx * dx + dy * dy;
+      if (distance < best) { best = distance; result = node; }
+    }
+    return result;
+  }, [position, view.nodes]);
+  const zoom = useCallback((factor: number, cx = size.width / 2, cy = size.height / 2) => {
+    setCamera((current) => {
+      const scale = Math.max(0.025, Math.min(20, current.scale * factor));
+      const ratio = scale / current.scale;
+      const next = { scale, x: cx - (cx - current.x) * ratio, y: cy - (cy - current.y) * ratio };
+      cameraRef.current = next;
+      return next;
+    });
+  }, [size]);
+  async function toggleFullscreen() {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await sectionRef.current?.requestFullscreen();
   }
 
+  const hoveredDetail = hovered ? nodeDetails.get(hovered) : null;
   return (
-    <section className="map-panel" aria-label="Directed transfer map">
-      <div className="map-head">
-        <div><span className="section-kicker">DIRECTED NETWORK</span><h2>Transfer map</h2><p>Click an account to inspect its incoming and outgoing links.</p></div>
-        <div className="map-actions"><button onClick={() => setCameraOverride({ key: focusKey, camera: fittedCamera() })}>Fit all</button><span>Scroll to zoom · drag to pan</span></div>
+    <section ref={sectionRef} className={`live-graph ${fullscreen ? "is-fullscreen" : ""}`}>
+      <div className="graph-controls">
+        <div><button onClick={() => zoom(1.6)}>+</button><button onClick={() => zoom(1 / 1.6)}>−</button><button onClick={fit}>{t.fit}</button></div>
+        <span>{t.hint}</span>
+        <button onClick={toggleFullscreen}>{fullscreen ? t.exit : `⛶ ${t.full}`}</button>
       </div>
-      <canvas
-        ref={canvasRef}
-        className="graph-canvas"
-        aria-label="Interactive transfer graph"
-        onPointerDown={(event) => {
-          const rect = event.currentTarget.getBoundingClientRect();
-          gesture.current = { x: event.clientX - rect.left, y: event.clientY - rect.top, camera, moved: false };
-          event.currentTarget.setPointerCapture(event.pointerId);
-        }}
-        onPointerMove={(event) => {
-          if (!gesture.current) return;
-          const rect = event.currentTarget.getBoundingClientRect();
-          const x = event.clientX - rect.left;
-          const y = event.clientY - rect.top;
-          const dx = x - gesture.current.x;
-          const dy = y - gesture.current.y;
-          if (Math.abs(dx) + Math.abs(dy) > 4) gesture.current.moved = true;
-          if (gesture.current.moved) setCameraOverride({ key: focusKey, camera: { ...gesture.current.camera,
-            offsetX: gesture.current.camera.offsetX + dx,
-            offsetY: gesture.current.camera.offsetY + dy } });
-        }}
-        onPointerUp={(event) => {
-          const drag = gesture.current;
-          gesture.current = null;
-          if (!drag?.moved) {
-            const rect = event.currentTarget.getBoundingClientRect();
-            selectAt(event.clientX - rect.left, event.clientY - rect.top);
-          }
-        }}
-      />
-      <div className="map-legend"><span><i className="legend-line incoming" />Received from → selected</span><span><i className="legend-line outgoing" />Selected → sent to</span><span><i className="legend-ring" />Seed account</span><span className="map-count">{graph.meta.n_nodes.toLocaleString("en-US")} accounts · {graph.meta.n_edges.toLocaleString("en-US")} directed links</span></div>
+      <div className="canvas-wrap">
+        <canvas
+          ref={canvasRef}
+          onWheel={(event) => {
+            event.preventDefault();
+            const bounds = event.currentTarget.getBoundingClientRect();
+            const x = event.clientX - bounds.left;
+            const y = event.clientY - bounds.top;
+            const pixels = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaMode === 2 ? event.deltaY * size.height : event.deltaY;
+            const normalized = Math.max(-180, Math.min(180, pixels));
+            zoom(Math.exp(-normalized * 0.0035), x, y);
+          }}
+          onPointerDown={(event) => {
+            const bounds = event.currentTarget.getBoundingClientRect();
+            const x = event.clientX - bounds.left;
+            const y = event.clientY - bounds.top;
+            const node = nearest(x, y);
+            event.currentTarget.setPointerCapture(event.pointerId);
+            interactionRef.current = node ? { kind: "node", gid: node.gid, moved: false } : { kind: "pan", sx: x, sy: y, camera: cameraRef.current, moved: false };
+          }}
+          onPointerMove={(event) => {
+            const bounds = event.currentTarget.getBoundingClientRect();
+            const x = event.clientX - bounds.left;
+            const y = event.clientY - bounds.top;
+            const drag = interactionRef.current;
+            if (!drag) { setHovered(nearest(x, y)?.gid ?? null); return; }
+            if (drag.kind === "node") {
+              drag.moved = true;
+              overridesRef.current.set(drag.gid, { x: (x - cameraRef.current.x) / cameraRef.current.scale, y: (y - cameraRef.current.y) / cameraRef.current.scale });
+              setLayoutVersion((value) => value + 1);
+            } else {
+              const dx = x - drag.sx;
+              const dy = y - drag.sy;
+              if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+              const next = { ...drag.camera, x: drag.camera.x + dx, y: drag.camera.y + dy };
+              cameraRef.current = next;
+              setCamera(next);
+            }
+          }}
+          onPointerUp={() => {
+            const drag = interactionRef.current;
+            interactionRef.current = null;
+            if (drag?.kind === "node" && !drag.moved) onSelect(drag.gid);
+          }}
+          onDoubleClick={(event) => {
+            const bounds = event.currentTarget.getBoundingClientRect();
+            const node = nearest(event.clientX - bounds.left, event.clientY - bounds.top);
+            if (node) { overridesRef.current.delete(node.gid); setLayoutVersion((value) => value + 1); }
+          }}
+          onPointerLeave={() => setHovered(null)}
+        />
+        {!viewIds.size && <div className="graph-empty">{t.localEmpty}</div>}
+        {hoveredDetail && <div className="vertex-tooltip"><strong>{hoveredDetail.gid}</strong><div><span style={{ background: priorityColor(hoveredDetail.priority_score) }} />{t.priority} {hoveredDetail.priority_score.toFixed(3)}</div><dl><dt>{t.incoming}</dt><dd>{edgeCounts.incoming.get(hoveredDetail.gid) ?? 0}</dd><dt>{t.outgoing}</dt><dd>{edgeCounts.outgoing.get(hoveredDetail.gid) ?? 0}</dd><dt>{t.cluster}</dt><dd>#{hoveredDetail.cluster_id}</dd></dl><small>{t.move}</small></div>}
+      </div>
+      <div className="priority-legend"><span>0</span><i /><span>1.0</span><small>{t.priority}</small></div>
     </section>
   );
 }

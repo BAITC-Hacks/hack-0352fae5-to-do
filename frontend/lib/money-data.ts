@@ -1,6 +1,6 @@
 import "server-only";
 
-import { readFile, readdir } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 export type MoneyNode = {
@@ -24,6 +24,29 @@ export type MoneyNode = {
   is_seed: boolean;
   truncated_by_depth: boolean;
   matched_out_2d_share: number | null;
+  priority_why: string | null;
+  top_rank: number | null;
+};
+
+export type MoneyInvestigation = {
+  route_count: number;
+  source_seed_count: number;
+  routes: {
+    gids: string[];
+    timing_status: string;
+    witness_transaction_ids: string[];
+  }[];
+  next_data_requests: {
+    code: string;
+    reason: string;
+    requested_data: string;
+    transaction_ids?: string[];
+  }[];
+};
+
+export type MoneyInvestigations = {
+  meta?: { coverage_limitations?: string[] };
+  accounts: Record<string, MoneyInvestigation>;
 };
 
 export type MoneyCluster = {
@@ -61,14 +84,6 @@ export type MoneyGraph = {
     sum_kzt: number;
     n_tx: number;
   }[];
-};
-
-export type MoneyData = {
-  nodes: MoneyNode[];
-  clusters: MoneyCluster[];
-  graph: MoneyGraph;
-  source: "pipeline" | "snapshot";
-  sourceWarning: string | null;
 };
 
 function parseCsv(source: string): Record<string, string>[] {
@@ -124,35 +139,55 @@ function bool(value: string): boolean {
   return value === "True" || value === "true" || value === "1";
 }
 
-export async function loadMoneyData(): Promise<MoneyData | null> {
-  const outputDirectory = path.resolve(process.cwd(), "../out");
-  const snapshotDirectory = path.resolve(process.cwd(), "data");
-  const requiredFiles = ["nodes_roles.csv", "clusters.csv", "top_nodes.csv", "graph.json"];
-  let outputFiles: string[] = [];
-  try {
-    outputFiles = await readdir(outputDirectory);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  const missing = requiredFiles.filter((file) => !outputFiles.includes(file));
-  const source = missing.length === 0 ? "pipeline" : "snapshot";
-  const sourceWarning = source === "snapshot" && outputFiles.some((file) => requiredFiles.includes(file))
-    ? `Local analysis is incomplete (missing ${missing.join(", ")}). Showing the bundled snapshot. Re-run the pipeline to refresh it.`
-    : null;
-  const directory = source === "pipeline" ? outputDirectory : snapshotDirectory;
+export async function loadMoneyData(): Promise<{
+  nodes: MoneyNode[];
+  clusters: MoneyCluster[];
+  graph: MoneyGraph;
+  investigations: MoneyInvestigations | null;
+} | null> {
   let nodeCsv: string;
   let clusterCsv: string;
   let graphJson: string;
-  try {
-    [nodeCsv, clusterCsv, , graphJson] = await Promise.all(
-      requiredFiles.map((file) => readFile(path.join(directory, file), "utf8")),
-    );
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT" && source === "snapshot") return null;
-    throw error;
+  let dataDirectory = "";
+  let found = false;
+  nodeCsv = "";
+  clusterCsv = "";
+  graphJson = "";
+  for (const directory of [path.resolve(process.cwd(), "../out"), path.resolve(process.cwd(), "data")]) {
+    try {
+      [nodeCsv, clusterCsv, graphJson] = await Promise.all([
+        readFile(path.join(directory, "nodes_roles.csv"), "utf8"),
+        readFile(path.join(directory, "clusters.csv"), "utf8"),
+        readFile(path.join(directory, "graph.json"), "utf8"),
+      ]);
+      found = true;
+      dataDirectory = directory;
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
   }
+  if (!found) return null;
 
-  const nodes = parseCsv(nodeCsv).map((row): MoneyNode => ({
+  let topRows: Record<string, string>[] = [];
+  let investigations: MoneyInvestigations | null = null;
+  try {
+    topRows = parseCsv(await readFile(path.join(dataDirectory, "top_nodes.csv"), "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  try {
+    investigations = JSON.parse(
+      await readFile(path.join(dataDirectory, "investigations.json"), "utf8"),
+    ) as MoneyInvestigations;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const topByGid = new Map(topRows.map((row) => [row.gid, row]));
+
+  const nodes = parseCsv(nodeCsv).map((row): MoneyNode => {
+    const top = topByGid.get(row.gid);
+    return ({
     gid: row.gid, // Always a string: gids exceed JavaScript's safe integer range.
     role: row.role,
     role_score: number(row.role_score),
@@ -173,7 +208,10 @@ export async function loadMoneyData(): Promise<MoneyData | null> {
     is_seed: bool(row.is_seed),
     truncated_by_depth: bool(row.truncated_by_depth),
     matched_out_2d_share: optionalNumber(row.matched_out_2d_share),
-  }));
+    priority_why: top?.why || null,
+    top_rank: top ? number(top.rank) : null,
+  });
+  });
   const clusters = parseCsv(clusterCsv).map((row): MoneyCluster => ({
     cluster_id: number(row.cluster_id),
     n_nodes: number(row.n_nodes),
@@ -187,5 +225,5 @@ export async function loadMoneyData(): Promise<MoneyData | null> {
       !graph.edges.every((edge) => typeof edge.src === "string" && typeof edge.dst === "string")) {
     throw new Error("graph.json account IDs must be strings");
   }
-  return { nodes, clusters, graph, source, sourceWarning };
+  return { nodes, clusters, graph, investigations };
 }

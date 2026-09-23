@@ -1,0 +1,50 @@
+@media (min-width: 1101px) {
+  .analyst-layout {
+    grid-template-columns: clamp(330px, 19vw, 390px) minmax(520px, 1fr) clamp(390px, 23vw, 470px);
+  }
+}
+
+.graph-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #7b898e;
+  font-size: 13px;
+  pointer-events: none;
+}
+
+.inspector h4 {
+  margin: 14px 0 6px;
+  color: #66767b;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.investigation-context > div {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.investigation-context span {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px;
+  background: #f4f6f4;
+  border-radius: 7px;
+  color: #748287;
+  font-size: 9px;
+}
+
+.investigation-context span b {
+  color: #172126;
+  font-size: 14px;
+}
+
+.route-details code {
+  overflow-wrap: anywhere;
+}
