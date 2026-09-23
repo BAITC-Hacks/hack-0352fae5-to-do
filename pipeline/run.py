@@ -149,7 +149,13 @@ def assign_priority(df: pd.DataFrame) -> pd.DataFrame:
     s = 1 / (1 + df.depth.to_numpy())
     p = cap_linear(df.pagerank.to_numpy())  # Amount-weighted PageRank only.
     r = df.role.map(ROLE_FACTOR).to_numpy()
-    df["priority_score"] = (r * (0.20 + 0.30 * a + 0.20 * d + 0.10 * s + 0.20 * p)).clip(0, 1)
+    df["priority_amount_kzt"] = amount
+    df["priority_amount_points"] = 0.30 * a
+    df["priority_breadth_points"] = 0.20 * d
+    df["priority_depth_points"] = 0.10 * s
+    df["priority_pagerank_points"] = 0.20 * p
+    df["priority_score"] = (r * (0.20 + df.priority_amount_points + df.priority_breadth_points
+                                 + df.priority_depth_points + df.priority_pagerank_points)).clip(0, 1)
     return df
 
 
@@ -248,6 +254,19 @@ def evidence(row) -> str:
             f"out/in={ratio}, depth={row.depth}, seed={int(row.is_seed)}")
 
 
+def priority_why(row, total_nodes: int) -> str:
+    flow = "outflow" if row.is_seed or row.out_kzt > row.in_kzt else "inflow"
+    links = "recipients" if row.is_seed else "counterparties"
+    return (f"Rank {row.rank}/{total_nodes} (priority {row.priority_score:.6f}): "
+            f"{row.role} multiplier {ROLE_FACTOR[row.role]:.2f}; "
+            f"observed {flow} {row.priority_amount_kzt:,.0f} KZT, "
+            f"{row.distinct_counterparties} {links}, hop {row.depth}, "
+            f"amount-weighted PageRank {row.pagerank:.6f}. "
+            f"Score terms before multiplier: base 0.20 + amount {row.priority_amount_points:.4f} "
+            f"+ breadth {row.priority_breadth_points:.4f} + depth {row.priority_depth_points:.4f} "
+            f"+ PageRank {row.priority_pagerank_points:.4f}.")
+
+
 def write_outputs(df: pd.DataFrame, cluster_df: pd.DataFrame, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     required = ["gid", "role", "role_score", "cluster_id", "priority_score", "evidence"]
@@ -258,7 +277,7 @@ def write_outputs(df: pd.DataFrame, cluster_df: pd.DataFrame, out_dir: Path) -> 
     cluster_df.to_csv(out_dir / "clusters.csv", index=False)
     top = df.sort_values(["priority_score", "gid"], ascending=[False, True]).head(20).copy()
     top.insert(0, "rank", range(1, len(top) + 1))
-    top["why"] = top.evidence
+    top["why"] = [priority_why(row, len(df)) for row in top.itertuples(index=False)]
     top[["rank", "gid", "role", "priority_score", "why"]].to_csv(out_dir / "top_nodes.csv", index=False)
 
 

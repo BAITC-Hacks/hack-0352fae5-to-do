@@ -119,7 +119,7 @@ Here `amount` and `counterparties` are log-scaled and capped at their respective
 | --- | --- | --- |
 | `out/nodes_roles.csv` | `gid, role, role_score, cluster_id, priority_score, evidence` | Exactly one row per input node (2,248 for the supplied data), plus observed metrics and data-quality flags. `evidence` contains numeric rule support. |
 | `out/clusters.csv` | `cluster_id, n_nodes, n_seed, sum_kzt_internal, top_gids, hypothesis` | One row per Louvain community. `sum_kzt_internal` sums original directed edges whose endpoints are both in that community; `top_gids` is a JSON list of identifier strings. |
-| `out/top_nodes.csv` | `rank, gid, role, priority_score, why` | The 20 highest-priority accounts. `why` currently repeats the node's role evidence; the priority formula above explains the ordering. |
+| `out/top_nodes.csv` | `rank, gid, role, priority_score, why` | The 20 highest-priority accounts. Each `why` explains its rank and score with the observed amount, counterparties, hop depth, amount-weighted PageRank, and the contributions from the priority formula above. |
 | `out/graph.json` | `meta, nodes, edges` | Viewer data with string gids, directed links, roles, clusters, priority, and precomputed map positions. |
 
 `data/` contains the supplied, anonymized Parquet inputs. `starter/` is organizer-provided loading and base-metric code; `pipeline/run.py` adds role rules, ranking, temporal support, clustering, and exports. `frontend/lib/money-data.ts` loads and parses the outputs on the server, and `frontend/app/` renders the interactive viewer. `frontend/data/` holds the committed viewer snapshot. No AI model, LLM, external customer-enrichment source, third-party data API, or paid service is used by the analysis. Vercel hosts the supplied deployment of the viewer.
@@ -131,7 +131,7 @@ Here `amount` and `counterparties` are log-scaled and capped at their respective
 - Seed inbound amounts may be understated because transfers into seeds from outside the sampled graph are missing. The pipeline does not use inbound or pass-through to assign seed-specific inbound roles.
 - Nineteen seeds have no observed edge. They remain in `nodes_roles.csv` and the map. The graph has disconnected parts; Louvain communities are analysis groups, not confirmed organizations.
 - The supplied dataset uses synthetic gids and is provided for hackathon use. There are no names, balances, customer attributes, labels for true roles, or ground-truth accuracy measure. All roles, priorities, and cluster descriptions are explainable hypotheses for analyst verification. The two-day timing measure cannot trace identical funds through an account.
-- The viewer reads files on disk; it does not offer an upload workflow or live transaction feed. The current top-list `why` field explains the **role**, while the separate formula above explains **priority**.
+- The viewer reads files on disk; it does not offer an upload workflow or live transaction feed.
 
 ## Scaling beyond the hackathon dataset
 
