@@ -42,7 +42,13 @@ python pipeline/run.py --data data --out out
 
 The final command is the complete recalculation from raw Parquet to the required three CSVs, plus `graph.json` and `investigations.json`. It is intended to complete within the case's five-minute limit on the supplied dataset. `out/` is generated locally and ignored by Git.
 
-To run the viewer locally, use Node.js 20.9 or newer and pnpm 11.7.0 (the version declared in `frontend/package.json`):
+To run the viewer locally, install Node.js 22.13 or newer. The project pins pnpm 11.7.0 in `frontend/package.json`; that pnpm release requires Node.js 22.13 or newer. Install pnpm if it is not already available:
+
+```bash
+npm install --global pnpm@11.7.0
+```
+
+Then run:
 
 ```bash
 cd frontend

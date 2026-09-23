@@ -1,6 +1,6 @@
 # Money Graph viewer
 
-The Next.js dashboard reads the complete analysis output set (`nodes_roles.csv`, `clusters.csv`, `top_nodes.csv`, and `graph.json`) from `../out/` during local development. If any file is absent, it uses the committed snapshot in `data/`, which is included in the production server bundle. The page labels the active source and warns when local output is incomplete.
+Use Node.js 22.13 or newer and pnpm 11.7.0 to run the viewer (`npm install --global pnpm@11.7.0` installs pnpm if needed). The Next.js dashboard reads the complete analysis output set (`nodes_roles.csv`, `clusters.csv`, `top_nodes.csv`, and `graph.json`) from `../out/` during local development. If any file is absent, it uses the committed snapshot in `data/`, which is included in the production server bundle. The page labels the active source and warns when local output is incomplete.
 
 It loads `investigations.json` from the same chosen directory. Schema, string gids, transaction references, and SHA-256 hashes of all four companion files must validate. Missing or incompatible evidence produces an availability message without disabling ordinary account analysis.
 
